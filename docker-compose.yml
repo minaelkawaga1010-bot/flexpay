@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: flexpay
+      POSTGRES_PASSWORD: flexpay
+      POSTGRES_DB: flexpay
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flexpay"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redisdata:/data"]
+
+  api:
+    build: ./backend
+    environment:
+      ENV: dev
+      DATABASE_URL: postgresql+psycopg://flexpay:flexpay@postgres:5432/flexpay
+      REDIS_URL: redis://redis:6379/0
+      OTP_DEV_FIXED_CODE: "123456"
+    ports: ["8000:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+volumes:
+  pgdata:
+  redisdata:
