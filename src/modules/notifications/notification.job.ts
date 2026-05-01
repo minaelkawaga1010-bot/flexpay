@@ -1,4 +1,5 @@
 import { notificationQueue } from '@config/bull';
+import { isUnitTest } from '@config/env';
 import logger from '@shared/utils/logger';
 import { notificationService } from './notification.service';
 
@@ -40,10 +41,9 @@ export function startNotificationWorker(): void {
   });
 }
 
-/** Enqueue a notification. No-op in test env so unit tests don't open Redis. */
+/** Enqueue a notification. No-op in unit tests so they don't open Redis. */
 export async function enqueueNotification(job: NotificationJob): Promise<void> {
-  if (process.env.NODE_ENV === 'test') return;
-  startNotificationWorker();
+  if (isUnitTest) return;
   await notificationQueue.add(job, {
     attempts: 5,
     backoff: { type: 'exponential', delay: 5000 },

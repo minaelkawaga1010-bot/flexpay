@@ -87,3 +87,10 @@ export const env: Env = parsed.data;
 export const isProd = env.NODE_ENV === 'production';
 export const isDev = env.NODE_ENV === 'development';
 export const isTest = env.NODE_ENV === 'test';
+
+/**
+ * Set when running the e2e suite — `NODE_ENV=test` but actually wired up
+ * to real Redis + Postgres. Modules that no-op in test should still run.
+ */
+export const isE2E = process.env.E2E_MODE === '1' || process.env.E2E_MODE === 'true';
+export const isUnitTest = isTest && !isE2E;

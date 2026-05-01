@@ -1,5 +1,5 @@
 import { createClient, RedisClientType } from 'redis';
-import { env, isTest } from './env';
+import { env, isUnitTest } from './env';
 import logger from '@shared/utils/logger';
 
 class RedisService {
@@ -17,7 +17,7 @@ class RedisService {
   }
 
   async connect(): Promise<void> {
-    if (this.connected || isTest) return;
+    if (this.connected || isUnitTest) return;
     try {
       await this.client.connect();
     } catch (err) {

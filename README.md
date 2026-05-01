@@ -97,9 +97,20 @@ npx prisma migrate dev --name init
 # 5. Run the API (with path aliases via tsconfig-paths)
 npm run dev
 
-# 6. Run tests
+# 6. Run unit tests (mocked Prisma + Redis)
 npm test
+
+# 7. Run e2e tests (requires real Postgres + Redis from docker-compose)
+npm run docker:up
+npx prisma migrate deploy
+npm run test:e2e
 ```
+
+The e2e suite (`tests/e2e/*.e2e.test.ts`) drives the live app via supertest
+and uses real Postgres + Redis. It boots with `E2E_MODE=1` so the
+in-test no-op guards in Redis/Bull don't short-circuit. External APIs
+(NymCard / Twilio / MoneyHash / FlexxPay) stay stubbed because their
+keys are still absent — the suite only asserts on FlexPay state.
 
 A health check is exposed at `GET /health`. The OpenAPI contract is at
 [`docs/openapi.yaml`](docs/openapi.yaml). All API endpoints live under

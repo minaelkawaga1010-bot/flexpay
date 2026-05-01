@@ -1,4 +1,5 @@
 import { payrollQueue } from '@config/bull';
+import { isUnitTest } from '@config/env';
 import logger from '@shared/utils/logger';
 
 interface PayrollJob {
@@ -38,8 +39,7 @@ function installWorker(): void {
 
 /** Schedule a single payroll for processing at a specific delay. */
 export async function enqueuePayrollJob(payrollId: string, delayMs: number): Promise<void> {
-  if (process.env.NODE_ENV === 'test') return;
-  installWorker();
+  if (isUnitTest) return;
   await payrollQueue.add(
     { kind: 'process-one', payrollId } satisfies PayrollJob,
     {
@@ -51,8 +51,7 @@ export async function enqueuePayrollJob(payrollId: string, delayMs: number): Pro
 
 /** Cron-driven sweep of any PENDING payrolls that slipped through. */
 export async function enqueueDuePayrolls(): Promise<void> {
-  if (process.env.NODE_ENV === 'test') return;
-  installWorker();
+  if (isUnitTest) return;
   await payrollQueue.add(
     { kind: 'process-due' } satisfies PayrollJob,
     { jobId: `due-${new Date().toISOString().slice(0, 10)}` },
