@@ -7,31 +7,42 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// -----------------------------------------------------------------------------
-// Core actors
-// -----------------------------------------------------------------------------
+// =====================================================================
+// ENUMS
+// =====================================================================
+
+enum UserRole {
+  EMPLOYEE
+  COMPANY
+  ADMIN
+}
 
 enum EmployeeStatus {
   PENDING_KYC
   ACTIVE
   BLOCKED
+  DEACTIVATED
 }
 
-enum EmployeePlan {
-  BASIC
-  LUXURY
+enum CompanyStatus {
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
 }
 
 enum TransactionType {
   DEPOSIT
   WITHDRAWAL
   TRANSFER
+  RECEIVE
   CASHBACK
+  FEE
+  REFERRAL_REWARD
+  SAVINGS_TRANSFER
+  CARD_PURCHASE
   PAYROLL
   REMITTANCE
-  CARD_FEE
-  SAVINGS
-  REFERRAL_REWARD
+  REFUND
 }
 
 enum TransactionStatus {
@@ -43,233 +54,393 @@ enum TransactionStatus {
 
 enum PayrollStatus {
   PENDING
-  PROCESSED
+  PROCESSING
+  COMPLETED
+  PARTIAL
   FAILED
 }
 
-enum PhysicalCardStatus {
-  ORDERED
-  IN_TRANSIT
-  DELIVERED
-  CANCELLED
+enum CardStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+  EXPIRED
+  REPLACED
+}
+
+enum CardType {
+  VIRTUAL
+  PHYSICAL
+}
+
+enum PlanType {
+  BASIC
+  LUXURY
 }
 
 enum SavingsGoalStatus {
   ACTIVE
   COMPLETED
+  PAUSED
   CANCELLED
 }
 
 enum LoanStatus {
   PENDING
+  APPROVED
   ACTIVE
   REPAID
   DEFAULTED
+  REJECTED
+}
+
+enum ReferralStatus {
+  PENDING
+  REWARDED
+  EXPIRED
+}
+
+// =====================================================================
+// CORE MODELS
+// =====================================================================
+
+model Employee {
+  id                    String              @id @default(uuid())
+  phone                 String              @unique
+  email                 String?             @unique
+  fullName              String
+  salary                Float?
+
+  walletBalance         Float               @default(0)
+  plan                  PlanType            @default(BASIC)
+
+  status                EmployeeStatus      @default(PENDING_KYC)
+  kycVerifiedAt         DateTime?
+  kycDocuments          Json?
+
+  // NymCard
+  nymcardCustomerId     String?
+
+  // Referrals (canonical relation lives on the Referral model)
+  referralCode          String              @unique @default(cuid())
+
+  creditScore           Int?                @default(50)
+  creditScoreUpdatedAt  DateTime?
+
+  deviceToken           String?
+  notificationsEnabled  Boolean             @default(true)
+
+  companyId             String?
+  company               Company?            @relation(fields: [companyId], references: [id])
+
+  cards                 Card[]
+  transactions          EmployeeTransaction[]
+  savingsGoals          SavingsGoal[]
+  loans                 Loan[]
+  offerClicks           OfferClick[]
+
+  // Inverse sides of the Referral relation
+  referralsMade         Referral[]          @relation("ReferralsMade")
+  referralReceived      Referral?           @relation("ReferralsReceived")
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  lastLoginAt           DateTime?
+
+  @@index([phone])
+  @@index([companyId])
+  @@index([status])
+  @@index([referralCode])
+  @@map("employees")
 }
 
 model Company {
-  id           String   @id @default(uuid())
-  name         String
-  tradeLicense String   @unique
-  adminName    String
-  adminEmail   String   @unique
-  adminPhone   String   @unique
-  passwordHash String
-  balance      Float    @default(0)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id                    String              @id @default(uuid())
+  name                  String
+  tradeLicense          String              @unique
+  adminName             String
+  adminEmail            String              @unique
+  adminPhone            String              @unique
+  passwordHash          String
 
-  employees         Employee[]
-  scheduledPayrolls ScheduledPayroll[]
+  balance               Float               @default(0)
+  currency              String              @default("AED")
+  status                CompanyStatus       @default(ACTIVE)
+
+  payrollDay            Int?
+  autoPayrollEnabled    Boolean             @default(false)
+
+  employees             Employee[]
+  scheduledPayrolls     ScheduledPayroll[]
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@index([adminEmail])
+  @@index([tradeLicense])
+  @@map("companies")
 }
 
-model Employee {
-  id                   String         @id @default(uuid())
-  phone                String         @unique
-  email                String?        @unique
-  fullName             String
-  salary               Float          @default(0)
-  walletBalance        Float          @default(0)
-  status               EmployeeStatus @default(PENDING_KYC)
-  plan                 EmployeePlan   @default(BASIC)
-  companyId            String?
-  nymcardCustomerId    String?
-  virtualCardId        String?        @unique
-  virtualCardLast4     String?
-  virtualCardExpiry    DateTime?
-  physicalCardTracking String?
-  physicalCardStatus   PhysicalCardStatus?
-  deviceToken          String?
-  referralCode         String         @unique
-  referredById         String?
-  createdAt            DateTime       @default(now())
-  updatedAt            DateTime       @updatedAt
+model Card {
+  id                    String              @id @default(uuid())
+  cardId                String              @unique  // NymCard external ID
+  customerId            String              // NymCard customer ID
 
-  company       Company?              @relation(fields: [companyId], references: [id])
-  transactions  EmployeeTransaction[]
-  savingsGoals  SavingsGoal[]
-  loans         Loan[]
-  offerClicks   OfferClick[]
-  refreshTokens RefreshToken[]
-  referralsMade Referral[]            @relation("ReferralReferrer")
-  referralIn    Referral?             @relation("ReferralReferee")
+  type                  CardType
+  status                CardStatus          @default(ACTIVE)
 
-  @@index([companyId])
+  last4                 String              @db.Char(4)
+  brand                 String              @default("VISA")
+  expiryMonth           Int
+  expiryYear            Int
+
+  dailyLimit            Float               @default(5000)
+  monthlyLimit          Float               @default(50000)
+  spentToday            Float               @default(0)
+  spentThisMonth        Float               @default(0)
+
+  shippingAddress       Json?
+  trackingNumber        String?
+  shippingStatus        String?
+
+  applePayToken         String?
+  googlePayToken        String?
+
+  employeeId            String
+  employee              Employee            @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  transactions          EmployeeTransaction[]
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@unique([employeeId, type])
+  @@index([customerId])
+  @@index([employeeId])
   @@index([status])
+  @@map("cards")
 }
-
-// -----------------------------------------------------------------------------
-// Transactions
-// -----------------------------------------------------------------------------
 
 model EmployeeTransaction {
-  id          String            @id @default(uuid())
-  employeeId  String
-  type        TransactionType
-  amount      Float
-  fee         Float             @default(0)
-  totalAmount Float
-  status      TransactionStatus @default(PENDING)
-  description String?
-  reference   String?
-  metadata    Json?
-  createdAt   DateTime          @default(now())
+  id                    String              @id @default(uuid())
 
-  employee Employee @relation(fields: [employeeId], references: [id])
+  employeeId            String
+  employee              Employee            @relation(fields: [employeeId], references: [id])
 
-  @@index([employeeId, createdAt(sort: Desc)])
-  @@index([type])
+  type                  TransactionType
+  amount                Float
+  fee                   Float               @default(0)
+  totalAmount           Float
+  currency              String              @default("AED")
+
+  status                TransactionStatus   @default(COMPLETED)
+
+  description           String?
+  reference             String?
+  merchantName          String?
+  merchantCategory      String?
+  location              Json?
+
+  counterpartyId        String?
+  counterpartyPhone     String?
+
+  cardId                String?
+  card                  Card?               @relation(fields: [cardId], references: [id])
+
+  payrollId             String?
+
+  idempotencyKey        String?             @unique
+
+  createdAt             DateTime            @default(now())
+  processedAt           DateTime?
+
+  @@index([employeeId, createdAt])
+  @@index([employeeId, type, status])
   @@index([reference])
+  @@index([idempotencyKey])
+  @@map("employee_transactions")
 }
-
-// -----------------------------------------------------------------------------
-// Payroll
-// -----------------------------------------------------------------------------
 
 model ScheduledPayroll {
-  id            String        @id @default(uuid())
-  companyId     String
-  employeeIds   String[]
-  amountPerEmployee Json      // map of employeeId -> amount, or null to use salary
-  totalAmount   Float
-  scheduledDate DateTime
-  status        PayrollStatus @default(PENDING)
-  failureReason String?
-  processedAt   DateTime?
-  createdAt     DateTime      @default(now())
+  id                    String              @id @default(uuid())
 
-  company Company @relation(fields: [companyId], references: [id])
+  companyId             String
+  company               Company             @relation(fields: [companyId], references: [id])
 
-  @@index([scheduledDate, status])
-  @@index([companyId])
+  // Materialised list of recipients. We avoid an implicit M2M relation here
+  // because payroll runs are immutable snapshots — they should not move with
+  // employee changes after scheduling.
+  employeeIds           String[]
+  amountPerEmployee     Json?
+
+  totalAmount           Float
+
+  scheduledDate         DateTime
+  processedAt           DateTime?
+
+  status                PayrollStatus       @default(PENDING)
+  failureReason         String?
+
+  createdBy             String
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@index([companyId, scheduledDate])
+  @@index([status])
+  @@map("scheduled_payrolls")
 }
 
-// -----------------------------------------------------------------------------
-// Affiliate offers
-// -----------------------------------------------------------------------------
+model SavingsGoal {
+  id                    String              @id @default(uuid())
+
+  employeeId            String
+  employee              Employee            @relation(fields: [employeeId], references: [id])
+
+  name                  String              @db.VarChar(100)
+  targetAmount          Float
+  savedAmount           Float               @default(0)
+
+  monthlyAuto           Float?
+  autoSaveDay           Int?
+
+  deadline              DateTime?
+  status                SavingsGoalStatus   @default(ACTIVE)
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@index([employeeId, status])
+  @@map("savings_goals")
+}
+
+model Loan {
+  id                    String              @id @default(uuid())
+
+  employeeId            String
+  employee              Employee            @relation(fields: [employeeId], references: [id])
+
+  type                  String
+  principal             Float
+  interestRate          Float               @default(0)
+  termDays              Int
+
+  status                LoanStatus          @default(PENDING)
+  approvedBy            String?
+  approvedAt            DateTime?
+
+  disbursedAmount       Float?
+  disbursedAt           DateTime?
+  disbursementTxnId     String?
+
+  repaidAmount          Float               @default(0)
+  nextDueDate           DateTime?
+  nextDueAmount         Float?
+  finalDueDate          DateTime?
+
+  partnerReference      String?
+  partnerData           Json?
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@index([employeeId, status])
+  @@index([partnerReference])
+  @@map("loans")
+}
+
+model Referral {
+  id                       String           @id @default(uuid())
+
+  referrerId               String
+  referrer                 Employee         @relation("ReferralsMade", fields: [referrerId], references: [id])
+
+  refereeId                String           @unique
+  referee                  Employee         @relation("ReferralsReceived", fields: [refereeId], references: [id])
+
+  status                   ReferralStatus   @default(PENDING)
+  rewardGiven              Boolean          @default(false)
+  rewardAmount             Float            @default(10)
+
+  refereeFirstDepositAt    DateTime?
+  refereeFirstDepositAmount Float?
+
+  createdAt                DateTime         @default(now())
+  rewardedAt               DateTime?
+
+  @@index([referrerId])
+  @@index([refereeId])
+  @@index([status])
+  @@map("referrals")
+}
 
 model Offer {
-  id                 String   @id @default(uuid())
-  title              String
-  description        String
-  discountPercentage Int
-  merchant           String
-  affiliateLink      String
-  imageUrl           String?
-  expiresAt          DateTime
-  isActive           Boolean  @default(true)
-  createdAt          DateTime @default(now())
+  id                    String              @id @default(uuid())
 
-  clicks OfferClick[]
+  title                 String
+  description           String?             @db.Text
+  discountPercentage    Int
 
-  @@index([isActive, expiresAt])
+  merchant              String
+  affiliateLink         String              @db.Text
+  imageUrl              String?
+  terms                 String?             @db.Text
+
+  planRequired          PlanType?
+  minSalary             Float?
+
+  expiresAt             DateTime
+  isActive              Boolean             @default(true)
+
+  clicks                Int                 @default(0)
+  conversions           Int                 @default(0)
+
+  offerClicks           OfferClick[]
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@index([merchant, isActive])
+  @@index([expiresAt])
+  @@map("offers")
 }
 
 model OfferClick {
-  id         String   @id @default(uuid())
-  offerId    String
-  employeeId String
-  clickedAt  DateTime @default(now())
-  ip         String?
+  id                    String              @id @default(uuid())
 
-  offer    Offer    @relation(fields: [offerId], references: [id])
-  employee Employee @relation(fields: [employeeId], references: [id])
+  offerId               String
+  offer                 Offer               @relation(fields: [offerId], references: [id])
 
-  @@index([offerId])
+  employeeId            String
+  employee              Employee            @relation(fields: [employeeId], references: [id])
+
+  clickedAt             DateTime            @default(now())
+  ipAddress             String?
+  userAgent             String?
+
+  converted             Boolean             @default(false)
+  conversionValue       Float?
+
+  @@index([offerId, clickedAt])
   @@index([employeeId])
+  @@map("offer_clicks")
 }
 
-// -----------------------------------------------------------------------------
-// Savings goals
-// -----------------------------------------------------------------------------
+model AuditLog {
+  id                    String              @id @default(uuid())
 
-model SavingsGoal {
-  id           String            @id @default(uuid())
-  employeeId   String
-  name         String
-  targetAmount Float
-  savedAmount  Float             @default(0)
-  monthlyAuto  Float?
-  deadline     DateTime?
-  status       SavingsGoalStatus @default(ACTIVE)
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
+  actorType             String
+  actorId               String?
+  action                String
+  resourceType          String?
+  resourceId            String?
 
-  employee Employee @relation(fields: [employeeId], references: [id])
+  metadata              Json?
+  ipAddress             String?
+  userAgent             String?
 
-  @@index([employeeId, status])
-}
+  createdAt             DateTime            @default(now())
 
-// -----------------------------------------------------------------------------
-// Lending: EWA / BNPL bookkeeping (partnership w/ FlexxPay)
-// -----------------------------------------------------------------------------
-
-model Loan {
-  id          String     @id @default(uuid())
-  employeeId  String
-  amount      Float
-  fee         Float      @default(0)
-  status      LoanStatus @default(PENDING)
-  externalRef String?
-  dueDate     DateTime?
-  repaidAt    DateTime?
-  createdAt   DateTime   @default(now())
-
-  employee Employee @relation(fields: [employeeId], references: [id])
-
-  @@index([employeeId, status])
-}
-
-// -----------------------------------------------------------------------------
-// Referrals
-// -----------------------------------------------------------------------------
-
-model Referral {
-  id          String   @id @default(uuid())
-  referrerId  String
-  refereeId   String   @unique
-  rewardGiven Boolean  @default(false)
-  createdAt   DateTime @default(now())
-
-  referrer Employee @relation("ReferralReferrer", fields: [referrerId], references: [id])
-  referee  Employee @relation("ReferralReferee", fields: [refereeId], references: [id])
-
-  @@index([referrerId])
-}
-
-// -----------------------------------------------------------------------------
-// Auth helpers
-// -----------------------------------------------------------------------------
-
-model RefreshToken {
-  id         String   @id @default(uuid())
-  employeeId String
-  tokenHash  String   @unique
-  expiresAt  DateTime
-  revokedAt  DateTime?
-  createdAt  DateTime @default(now())
-
-  employee Employee @relation(fields: [employeeId], references: [id])
-
-  @@index([employeeId])
+  @@index([actorType, actorId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
 }

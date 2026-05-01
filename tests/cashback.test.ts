@@ -1,4 +1,4 @@
-jest.mock('../src/config/db', () => {
+jest.mock('@config/prisma', () => {
   const tx = {
     employee: { update: jest.fn() },
     employeeTransaction: { create: jest.fn() },
@@ -13,13 +13,12 @@ jest.mock('../src/config/db', () => {
   };
 });
 
-jest.mock('../src/services/notificationService', () => ({
+jest.mock('@modules/notifications/notification.service', () => ({
   notificationService: { notifyCashback: jest.fn().mockResolvedValue(undefined) },
-  sendPushNotification: jest.fn().mockResolvedValue(undefined),
 }));
 
-import { cashbackService } from '../src/modules/cashback/cashbackService';
-import { prisma } from '../src/config/db';
+import { cashbackService } from '@modules/cashback/cashback.service';
+import { prisma } from '@config/prisma';
 
 const mocked = prisma as unknown as {
   employee: { findUnique: jest.Mock };
@@ -29,9 +28,7 @@ const mocked = prisma as unknown as {
 };
 
 describe('cashbackService.credit', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
+  beforeEach(() => jest.clearAllMocks());
 
   it('credits 1% for BASIC plan and respects the 100 AED monthly cap', async () => {
     mocked.employee.findUnique.mockResolvedValue({ id: 'e1', plan: 'BASIC' });
@@ -47,7 +44,6 @@ describe('cashbackService.credit', () => {
   it('caps cashback at remaining monthly headroom for BASIC plan', async () => {
     mocked.employee.findUnique.mockResolvedValue({ id: 'e1', plan: 'BASIC' });
     mocked.employeeTransaction.aggregate.mockResolvedValue({ _sum: { amount: 99 } });
-    // 1% of 500 = 5, but only 1 AED of headroom remains
     const credited = await cashbackService.credit('e1', 500, 'RESTAURANT');
     expect(credited).toBe(1);
   });

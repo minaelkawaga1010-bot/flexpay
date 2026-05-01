@@ -1,26 +1,35 @@
-jest.mock('../src/config/db', () => ({
+jest.mock('@config/prisma', () => ({
   prisma: {
-    employee: { findUnique: jest.fn() },
+    employee: { findUnique: jest.fn(), update: jest.fn().mockResolvedValue({}) },
     employeeTransaction: { count: jest.fn() },
     referral: { count: jest.fn() },
     loan: { count: jest.fn() },
   },
 }));
 
-import { creditScoreService } from '../src/modules/scoring/creditScoreService';
-import { prisma } from '../src/config/db';
+jest.mock('@config/redis', () => ({
+  __esModule: true,
+  default: {
+    get: jest.fn().mockResolvedValue(null),
+    set: jest.fn().mockResolvedValue(undefined),
+    del: jest.fn().mockResolvedValue(undefined),
+  },
+}));
+
+import { scoringService } from '@modules/scoring/scoring.service';
+import { prisma } from '@config/prisma';
 
 const mockedPrisma = prisma as unknown as {
-  employee: { findUnique: jest.Mock };
+  employee: { findUnique: jest.Mock; update: jest.Mock };
   employeeTransaction: { count: jest.Mock };
   referral: { count: jest.Mock };
   loan: { count: jest.Mock };
 };
 
-describe('creditScoreService.compute', () => {
+describe('scoringService.compute', () => {
   beforeEach(async () => {
-    jest.resetAllMocks();
-    await creditScoreService.invalidate('emp-1');
+    jest.clearAllMocks();
+    await scoringService.invalidate('emp-1');
   });
 
   it('uses base 50 when there is no history', async () => {
@@ -29,7 +38,7 @@ describe('creditScoreService.compute', () => {
     mockedPrisma.referral.count.mockResolvedValue(0);
     mockedPrisma.loan.count.mockResolvedValue(0);
 
-    const result = await creditScoreService.compute('emp-1', { skipCache: true });
+    const result = await scoringService.compute('emp-1', { skipCache: true });
     expect(result.score).toBe(50);
     expect(result.eligibleForEWA).toBe(false);
     expect(result.maxEWAAmount).toBe(0);
@@ -41,7 +50,7 @@ describe('creditScoreService.compute', () => {
     mockedPrisma.referral.count.mockResolvedValue(2); // +5
     mockedPrisma.loan.count.mockResolvedValue(0);
 
-    const result = await creditScoreService.compute('emp-1', { skipCache: true });
+    const result = await scoringService.compute('emp-1', { skipCache: true });
     // 50 base + 10 tx + 15 balance + 5 referrals = 80
     expect(result.score).toBe(80);
     expect(result.eligibleForEWA).toBe(true);
@@ -54,7 +63,7 @@ describe('creditScoreService.compute', () => {
     mockedPrisma.referral.count.mockResolvedValue(0);
     mockedPrisma.loan.count.mockResolvedValue(5); // -75
 
-    const result = await creditScoreService.compute('emp-1', { skipCache: true });
+    const result = await scoringService.compute('emp-1', { skipCache: true });
     expect(result.score).toBe(0);
     expect(result.eligibleForEWA).toBe(false);
   });
@@ -65,7 +74,7 @@ describe('creditScoreService.compute', () => {
     mockedPrisma.referral.count.mockResolvedValue(10);
     mockedPrisma.loan.count.mockResolvedValue(0);
 
-    const result = await creditScoreService.compute('emp-1', { skipCache: true });
+    const result = await scoringService.compute('emp-1', { skipCache: true });
     expect(result.score).toBeLessThanOrEqual(100);
     expect(result.score).toBeGreaterThan(90);
   });

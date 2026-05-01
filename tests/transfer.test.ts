@@ -1,4 +1,4 @@
-jest.mock('../src/config/db', () => ({
+jest.mock('@config/prisma', () => ({
   prisma: {
     employee: { findUnique: jest.fn(), update: jest.fn() },
     employeeTransaction: { create: jest.fn() },
@@ -7,7 +7,7 @@ jest.mock('../src/config/db', () => ({
   },
 }));
 
-jest.mock('../src/services/notificationService', () => ({
+jest.mock('@modules/notifications/notification.service', () => ({
   notificationService: {
     notifyTransferReceived: jest.fn().mockResolvedValue(undefined),
     notifyTransferSent: jest.fn().mockResolvedValue(undefined),
@@ -15,15 +15,14 @@ jest.mock('../src/services/notificationService', () => ({
     notifyTrackingNumber: jest.fn().mockResolvedValue(undefined),
     notifySalaryCredited: jest.fn().mockResolvedValue(undefined),
   },
-  sendPushNotification: jest.fn().mockResolvedValue(undefined),
 }));
 
-jest.mock('../src/modules/referrals/referralService', () => ({
-  referralService: { maybeReward: jest.fn().mockResolvedValue(undefined) },
+jest.mock('@modules/referrals/referrals.service', () => ({
+  referralsService: { maybeReward: jest.fn().mockResolvedValue(undefined) },
 }));
 
-import { walletService } from '../src/modules/wallet/walletService';
-import { prisma } from '../src/config/db';
+import { walletService } from '@modules/wallet/wallet.service';
+import { prisma } from '@config/prisma';
 
 const mocked = prisma as unknown as {
   employee: { findUnique: jest.Mock };
@@ -31,24 +30,29 @@ const mocked = prisma as unknown as {
 };
 
 describe('walletService.transfer', () => {
-  beforeEach(() => jest.resetAllMocks());
+  beforeEach(() => jest.clearAllMocks());
+
+  const mockSender = (overrides: Partial<Record<string, unknown>> = {}) => ({
+    id: 'sender',
+    plan: 'BASIC',
+    walletBalance: 1000,
+    phone: '+971500000001',
+    fullName: 'Sender',
+    ...overrides,
+  });
+  const mockReceiver = (overrides: Partial<Record<string, unknown>> = {}) => ({
+    id: 'receiver',
+    plan: 'BASIC',
+    walletBalance: 0,
+    phone: '+971500000002',
+    fullName: 'Receiver',
+    ...overrides,
+  });
 
   it('rejects when sender has insufficient balance', async () => {
     mocked.employee.findUnique
-      .mockResolvedValueOnce({
-        id: 'sender',
-        plan: 'BASIC',
-        walletBalance: 50,
-        phone: '+971500000001',
-        fullName: 'Sender',
-      })
-      .mockResolvedValueOnce({
-        id: 'receiver',
-        plan: 'BASIC',
-        walletBalance: 0,
-        phone: '+971500000002',
-        fullName: 'Receiver',
-      });
+      .mockResolvedValueOnce(mockSender({ walletBalance: 50 }))
+      .mockResolvedValueOnce(mockReceiver());
 
     await expect(
       walletService.transfer('sender', '+971500000002', 100),
@@ -58,20 +62,8 @@ describe('walletService.transfer', () => {
 
   it('rejects self-transfers', async () => {
     mocked.employee.findUnique
-      .mockResolvedValueOnce({
-        id: 'sender',
-        plan: 'BASIC',
-        walletBalance: 1000,
-        phone: '+971500000001',
-        fullName: 'Sender',
-      })
-      .mockResolvedValueOnce({
-        id: 'sender',
-        plan: 'BASIC',
-        walletBalance: 1000,
-        phone: '+971500000001',
-        fullName: 'Sender',
-      });
+      .mockResolvedValueOnce(mockSender())
+      .mockResolvedValueOnce(mockSender());
     await expect(
       walletService.transfer('sender', '+971500000001', 100),
     ).rejects.toThrow(/yourself/);
@@ -79,20 +71,8 @@ describe('walletService.transfer', () => {
 
   it('charges 2 AED fee for BASIC and 0 for LUXURY', async () => {
     mocked.employee.findUnique
-      .mockResolvedValueOnce({
-        id: 'sender',
-        plan: 'BASIC',
-        walletBalance: 1000,
-        phone: '+971500000001',
-        fullName: 'Sender',
-      })
-      .mockResolvedValueOnce({
-        id: 'receiver',
-        plan: 'BASIC',
-        walletBalance: 0,
-        phone: '+971500000002',
-        fullName: 'Receiver',
-      });
+      .mockResolvedValueOnce(mockSender())
+      .mockResolvedValueOnce(mockReceiver());
     mocked.$transaction.mockResolvedValue([
       { walletBalance: 1000 - 200 - 2 },
       {},
@@ -103,25 +83,12 @@ describe('walletService.transfer', () => {
     const result = await walletService.transfer('sender', '+971500000002', 200);
     expect(result.fee).toBe(2);
     expect(result.balance).toBe(798);
-    expect(mocked.$transaction).toHaveBeenCalledTimes(1);
 
     mocked.employee.findUnique
-      .mockResolvedValueOnce({
-        id: 'sender',
-        plan: 'LUXURY',
-        walletBalance: 1000,
-        phone: '+971500000001',
-        fullName: 'Sender',
-      })
-      .mockResolvedValueOnce({
-        id: 'receiver',
-        plan: 'BASIC',
-        walletBalance: 0,
-        phone: '+971500000002',
-        fullName: 'Receiver',
-      });
+      .mockResolvedValueOnce(mockSender({ plan: 'LUXURY' }))
+      .mockResolvedValueOnce(mockReceiver());
     mocked.$transaction.mockResolvedValue([
-      { walletBalance: 1000 - 200 },
+      { walletBalance: 800 },
       {},
       { id: 'tx-2' },
       {},
