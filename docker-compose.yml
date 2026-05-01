@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: flexpay
+      POSTGRES_PASSWORD: flexpay
+      POSTGRES_DB: flexpay
+    ports:
+      - "5432:5432"
+    volumes:
+      - flexpay-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flexpay -d flexpay"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - flexpay-redis:/data
+
+  api:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      NODE_ENV: development
+      PORT: 4000
+      DATABASE_URL: postgresql://flexpay:flexpay@postgres:5432/flexpay?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: dev-secret-change-me
+    ports:
+      - "4000:4000"
+    command: sh -c "npx prisma migrate deploy && node dist/server.js"
+
+volumes:
+  flexpay-pg:
+  flexpay-redis:

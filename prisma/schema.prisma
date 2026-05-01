@@ -1,0 +1,275 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// Core actors
+// -----------------------------------------------------------------------------
+
+enum EmployeeStatus {
+  PENDING_KYC
+  ACTIVE
+  BLOCKED
+}
+
+enum EmployeePlan {
+  BASIC
+  LUXURY
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  TRANSFER
+  CASHBACK
+  PAYROLL
+  REMITTANCE
+  CARD_FEE
+  SAVINGS
+  REFERRAL_REWARD
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REVERSED
+}
+
+enum PayrollStatus {
+  PENDING
+  PROCESSED
+  FAILED
+}
+
+enum PhysicalCardStatus {
+  ORDERED
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+}
+
+enum SavingsGoalStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum LoanStatus {
+  PENDING
+  ACTIVE
+  REPAID
+  DEFAULTED
+}
+
+model Company {
+  id           String   @id @default(uuid())
+  name         String
+  tradeLicense String   @unique
+  adminName    String
+  adminEmail   String   @unique
+  adminPhone   String   @unique
+  passwordHash String
+  balance      Float    @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  employees         Employee[]
+  scheduledPayrolls ScheduledPayroll[]
+}
+
+model Employee {
+  id                   String         @id @default(uuid())
+  phone                String         @unique
+  email                String?        @unique
+  fullName             String
+  salary               Float          @default(0)
+  walletBalance        Float          @default(0)
+  status               EmployeeStatus @default(PENDING_KYC)
+  plan                 EmployeePlan   @default(BASIC)
+  companyId            String?
+  nymcardCustomerId    String?
+  virtualCardId        String?        @unique
+  virtualCardLast4     String?
+  virtualCardExpiry    DateTime?
+  physicalCardTracking String?
+  physicalCardStatus   PhysicalCardStatus?
+  deviceToken          String?
+  referralCode         String         @unique
+  referredById         String?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  company       Company?              @relation(fields: [companyId], references: [id])
+  transactions  EmployeeTransaction[]
+  savingsGoals  SavingsGoal[]
+  loans         Loan[]
+  offerClicks   OfferClick[]
+  refreshTokens RefreshToken[]
+  referralsMade Referral[]            @relation("ReferralReferrer")
+  referralIn    Referral?             @relation("ReferralReferee")
+
+  @@index([companyId])
+  @@index([status])
+}
+
+// -----------------------------------------------------------------------------
+// Transactions
+// -----------------------------------------------------------------------------
+
+model EmployeeTransaction {
+  id          String            @id @default(uuid())
+  employeeId  String
+  type        TransactionType
+  amount      Float
+  fee         Float             @default(0)
+  totalAmount Float
+  status      TransactionStatus @default(PENDING)
+  description String?
+  reference   String?
+  metadata    Json?
+  createdAt   DateTime          @default(now())
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId, createdAt(sort: Desc)])
+  @@index([type])
+  @@index([reference])
+}
+
+// -----------------------------------------------------------------------------
+// Payroll
+// -----------------------------------------------------------------------------
+
+model ScheduledPayroll {
+  id            String        @id @default(uuid())
+  companyId     String
+  employeeIds   String[]
+  amountPerEmployee Json      // map of employeeId -> amount, or null to use salary
+  totalAmount   Float
+  scheduledDate DateTime
+  status        PayrollStatus @default(PENDING)
+  failureReason String?
+  processedAt   DateTime?
+  createdAt     DateTime      @default(now())
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([scheduledDate, status])
+  @@index([companyId])
+}
+
+// -----------------------------------------------------------------------------
+// Affiliate offers
+// -----------------------------------------------------------------------------
+
+model Offer {
+  id                 String   @id @default(uuid())
+  title              String
+  description        String
+  discountPercentage Int
+  merchant           String
+  affiliateLink      String
+  imageUrl           String?
+  expiresAt          DateTime
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+
+  clicks OfferClick[]
+
+  @@index([isActive, expiresAt])
+}
+
+model OfferClick {
+  id         String   @id @default(uuid())
+  offerId    String
+  employeeId String
+  clickedAt  DateTime @default(now())
+  ip         String?
+
+  offer    Offer    @relation(fields: [offerId], references: [id])
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([offerId])
+  @@index([employeeId])
+}
+
+// -----------------------------------------------------------------------------
+// Savings goals
+// -----------------------------------------------------------------------------
+
+model SavingsGoal {
+  id           String            @id @default(uuid())
+  employeeId   String
+  name         String
+  targetAmount Float
+  savedAmount  Float             @default(0)
+  monthlyAuto  Float?
+  deadline     DateTime?
+  status       SavingsGoalStatus @default(ACTIVE)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId, status])
+}
+
+// -----------------------------------------------------------------------------
+// Lending: EWA / BNPL bookkeeping (partnership w/ FlexxPay)
+// -----------------------------------------------------------------------------
+
+model Loan {
+  id          String     @id @default(uuid())
+  employeeId  String
+  amount      Float
+  fee         Float      @default(0)
+  status      LoanStatus @default(PENDING)
+  externalRef String?
+  dueDate     DateTime?
+  repaidAt    DateTime?
+  createdAt   DateTime   @default(now())
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId, status])
+}
+
+// -----------------------------------------------------------------------------
+// Referrals
+// -----------------------------------------------------------------------------
+
+model Referral {
+  id          String   @id @default(uuid())
+  referrerId  String
+  refereeId   String   @unique
+  rewardGiven Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  referrer Employee @relation("ReferralReferrer", fields: [referrerId], references: [id])
+  referee  Employee @relation("ReferralReferee", fields: [refereeId], references: [id])
+
+  @@index([referrerId])
+}
+
+// -----------------------------------------------------------------------------
+// Auth helpers
+// -----------------------------------------------------------------------------
+
+model RefreshToken {
+  id         String   @id @default(uuid())
+  employeeId String
+  tokenHash  String   @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime @default(now())
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId])
+}

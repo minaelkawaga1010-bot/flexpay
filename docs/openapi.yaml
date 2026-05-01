@@ -1,0 +1,446 @@
+openapi: 3.0.3
+info:
+  title: FlexPay API
+  version: 0.1.0
+  description: |
+    FlexPay backend — payroll wallet, virtual/physical cards, P2P transfers,
+    cashback, savings, credit scoring, EWA (FlexxPay), remittance (MoneyHash),
+    referrals, and push notifications.
+
+servers:
+  - url: http://localhost:4000/api
+    description: Local
+
+tags:
+  - name: auth
+  - name: wallet
+  - name: companies
+  - name: cards
+  - name: offers
+  - name: savings
+  - name: scoring
+  - name: ewa
+  - name: remittance
+  - name: referrals
+  - name: notifications
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    IdempotencyKey:
+      in: header
+      name: Idempotency-Key
+      schema: { type: string }
+      required: false
+      description: Optional client-generated key to safely retry write operations.
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: {}
+    EmployeeAuthResponse:
+      type: object
+      properties:
+        token: { type: string }
+        refreshToken: { type: string }
+        employee:
+          type: object
+          properties:
+            id: { type: string }
+            fullName: { type: string }
+            balance: { type: number }
+    CompanyAuthResponse:
+      type: object
+      properties:
+        token: { type: string }
+        refreshToken: { type: string }
+        company:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+            balance: { type: number }
+    Transaction:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [DEPOSIT, WITHDRAWAL, TRANSFER, CASHBACK, PAYROLL, REMITTANCE, CARD_FEE, SAVINGS, REFERRAL_REWARD] }
+        amount: { type: number }
+        fee: { type: number }
+        totalAmount: { type: number }
+        status: { type: string, enum: [PENDING, COMPLETED, FAILED, REVERSED] }
+        description: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/employee/request-otp:
+    post:
+      tags: [auth]
+      security: []
+      summary: Send OTP via SMS
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone: { type: string, example: "+971501234567" }
+      responses:
+        '200': { description: OK }
+        '429': { description: Rate limited }
+
+  /auth/employee/verify-otp:
+    post:
+      tags: [auth]
+      security: []
+      summary: Verify OTP and create/return employee session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, otp, fullName]
+              properties:
+                phone: { type: string }
+                otp: { type: string }
+                fullName: { type: string }
+                salary: { type: number }
+                companyId: { type: string, format: uuid }
+                referralCode: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EmployeeAuthResponse' }
+
+  /auth/company/register:
+    post:
+      tags: [auth]
+      security: []
+      summary: Register a company account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, tradeLicense, adminName, adminEmail, adminPhone, password]
+              properties:
+                name: { type: string }
+                tradeLicense: { type: string }
+                adminName: { type: string }
+                adminEmail: { type: string, format: email }
+                adminPhone: { type: string }
+                password: { type: string, minLength: 8 }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CompanyAuthResponse' }
+
+  /auth/company/login:
+    post:
+      tags: [auth]
+      security: []
+      summary: Company login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        '200': { description: OK }
+
+  /wallet/balance:
+    get:
+      tags: [wallet]
+      summary: Get current wallet balance
+      responses: { '200': { description: OK } }
+
+  /wallet/transactions:
+    get:
+      tags: [wallet]
+      summary: List transactions
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20, maximum: 100 }
+        - in: query
+          name: offset
+          schema: { type: integer, default: 0 }
+      responses: { '200': { description: OK } }
+
+  /wallet/transfer:
+    post:
+      tags: [wallet]
+      summary: P2P transfer to another FlexPay user
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [recipientPhone, amount]
+              properties:
+                recipientPhone: { type: string }
+                amount: { type: number, minimum: 0.01 }
+      responses:
+        '200': { description: OK }
+        '400': { description: Bad request }
+
+  /companies/employees:
+    get:
+      tags: [companies]
+      summary: List employees of the company
+      responses: { '200': { description: OK } }
+    post:
+      tags: [companies]
+      summary: Add an employee
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fullName, phone]
+              properties:
+                fullName: { type: string }
+                phone: { type: string }
+                email: { type: string, format: email }
+                salary: { type: number }
+      responses: { '201': { description: Created } }
+
+  /companies/payroll/schedule:
+    post:
+      tags: [companies]
+      summary: Schedule payroll
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [employeeIds, date]
+              properties:
+                employeeIds: { type: array, items: { type: string, format: uuid } }
+                amount: { type: number }
+                date: { type: string, format: date-time }
+      responses: { '201': { description: Created } }
+
+  /cards/physical:
+    post:
+      tags: [cards]
+      summary: Order a physical card (30 AED fee)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address]
+              properties:
+                address:
+                  type: object
+                  required: [street, city, country, postalCode]
+                  properties:
+                    street: { type: string }
+                    city: { type: string }
+                    country: { type: string }
+                    postalCode: { type: string }
+      responses: { '200': { description: OK } }
+
+  /cards/tokenize:
+    post:
+      tags: [cards]
+      summary: Add card to Apple Pay / Google Pay
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [walletType]
+              properties:
+                walletType: { type: string, enum: [APPLE_PAY, GOOGLE_PAY] }
+      responses: { '200': { description: OK } }
+
+  /offers:
+    get:
+      tags: [offers]
+      summary: List active offers
+      responses: { '200': { description: OK } }
+
+  /offers/{offerId}/click:
+    post:
+      tags: [offers]
+      summary: Record an offer click and redirect to affiliate URL
+      parameters:
+        - in: path
+          name: offerId
+          required: true
+          schema: { type: string }
+      responses: { '302': { description: Redirect } }
+
+  /savings/goals:
+    get: { tags: [savings], summary: List goals, responses: { '200': { description: OK } } }
+    post:
+      tags: [savings]
+      summary: Create goal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, targetAmount]
+              properties:
+                name: { type: string }
+                targetAmount: { type: number }
+                monthlyAuto: { type: number }
+                deadline: { type: string, format: date-time }
+      responses: { '201': { description: Created } }
+
+  /savings/goals/{id}/deposit:
+    post:
+      tags: [savings]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { type: number }
+      responses: { '200': { description: OK } }
+
+  /savings/goals/{id}/withdraw:
+    post:
+      tags: [savings]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { type: number }
+      responses: { '200': { description: OK } }
+
+  /employees/credit-score:
+    get:
+      tags: [scoring]
+      summary: Compute (cached) credit score for the authenticated employee
+      responses: { '200': { description: OK } }
+
+  /ewa/request:
+    post:
+      tags: [ewa]
+      summary: Request a salary advance via FlexxPay
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, returnUrl]
+              properties:
+                amount: { type: number }
+                returnUrl: { type: string, format: uri }
+      responses: { '200': { description: OK } }
+
+  /remittance/quote:
+    get:
+      tags: [remittance]
+      summary: Get an indicative AED -> currency quote
+      parameters:
+        - in: query
+          name: amount
+          required: true
+          schema: { type: number }
+        - in: query
+          name: currency
+          required: true
+          schema: { type: string, minLength: 3, maxLength: 3 }
+      responses: { '200': { description: OK } }
+
+  /remittance/send:
+    post:
+      tags: [remittance]
+      summary: Send international remittance via MoneyHash
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, currency, beneficiary]
+              properties:
+                amount: { type: number }
+                currency: { type: string }
+                beneficiary:
+                  type: object
+                  required: [name, bankAccount, swiftCode]
+                  properties:
+                    name: { type: string }
+                    bankAccount: { type: string }
+                    swiftCode: { type: string }
+      responses: { '200': { description: OK } }
+
+  /referrals/my-code:
+    get:
+      tags: [referrals]
+      summary: Get my referral code
+      responses: { '200': { description: OK } }
+
+  /notifications/register:
+    post:
+      tags: [notifications]
+      summary: Register an FCM device token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceToken]
+              properties:
+                deviceToken: { type: string }
+      responses: { '200': { description: OK } }
