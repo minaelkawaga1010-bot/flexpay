@@ -1,11 +1,19 @@
-import { Prisma } from '@prisma/client';
+import { Prisma, TransactionType } from '@prisma/client';
 import { prisma } from '@config/prisma';
 import { env } from '@config/env';
-import { BadRequest, NotFound } from '@shared/utils/errors';
-import { notificationService } from '@modules/notifications/notification.service';
+import { BadRequest, Forbidden, NotFound } from '@shared/utils/errors';
+import { enqueueNotification } from '@modules/notifications/notification.job';
 import { referralsService } from '@modules/referrals/referrals.service';
 
-export const walletService = {
+export interface ListTransactionsArgs {
+  limit?: number;
+  offset?: number;
+  type?: TransactionType;
+  startDate?: Date | string;
+  endDate?: Date | string;
+}
+
+export class WalletService {
   async getBalance(employeeId: string): Promise<number> {
     const employee = await prisma.employee.findUnique({
       where: { id: employeeId },
@@ -13,85 +21,163 @@ export const walletService = {
     });
     if (!employee) throw NotFound('Employee not found');
     return employee.walletBalance;
-  },
+  }
 
-  async listTransactions(employeeId: string, limit: number, offset: number) {
-    return prisma.employeeTransaction.findMany({
-      where: { employeeId },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-      skip: offset,
-    });
-  },
+  async getTransactions(employeeId: string, args: ListTransactionsArgs) {
+    const limit = args.limit ?? 20;
+    const offset = args.offset ?? 0;
 
-  async transfer(senderId: string, recipientPhone: string, amount: number) {
+    const where: Prisma.EmployeeTransactionWhereInput = {
+      employeeId,
+      status: 'COMPLETED',
+    };
+    if (args.type) where.type = args.type;
+    if (args.startDate || args.endDate) {
+      where.createdAt = {};
+      if (args.startDate) (where.createdAt as Prisma.DateTimeFilter).gte = new Date(args.startDate);
+      if (args.endDate) (where.createdAt as Prisma.DateTimeFilter).lte = new Date(args.endDate);
+    }
+
+    const [transactions, total] = await Promise.all([
+      prisma.employeeTransaction.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          type: true,
+          amount: true,
+          fee: true,
+          totalAmount: true,
+          currency: true,
+          status: true,
+          description: true,
+          merchantName: true,
+          counterpartyPhone: true,
+          createdAt: true,
+        },
+        take: limit,
+        skip: offset,
+      }),
+      prisma.employeeTransaction.count({ where }),
+    ]);
+
+    return {
+      transactions,
+      pagination: { total, limit, offset, hasMore: offset + limit < total },
+    };
+  }
+
+  async transfer(args: {
+    senderId: string;
+    recipientPhone: string;
+    amount: number;
+    idempotencyKey?: string;
+  }) {
+    const { senderId, recipientPhone, amount, idempotencyKey } = args;
     if (amount <= 0) throw BadRequest('Amount must be positive');
 
-    const sender = await prisma.employee.findUnique({ where: { id: senderId } });
-    if (!sender) throw NotFound('Sender not found');
+    // Service-level idempotency: if a transaction with this key already
+    // exists, replay its outcome rather than create a duplicate.
+    if (idempotencyKey) {
+      const existing = await prisma.employeeTransaction.findUnique({
+        where: { idempotencyKey },
+      });
+      if (existing) {
+        return {
+          success: true,
+          transactionId: existing.id,
+          balance: await this.getBalance(senderId),
+          fee: existing.fee,
+          replay: true,
+        };
+      }
+    }
 
-    const recipient = await prisma.employee.findUnique({ where: { phone: recipientPhone } });
-    if (!recipient) throw NotFound('Recipient not found');
-    if (recipient.id === sender.id) throw BadRequest('Cannot transfer to yourself');
+    return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      const sender = await tx.employee.findFirst({ where: { id: senderId, status: 'ACTIVE' } });
+      if (!sender) throw NotFound('SENDER_NOT_FOUND');
 
-    const fee = sender.plan === 'LUXURY' ? 0 : env.P2P_TRANSFER_FEE;
-    const total = amount + fee;
-    if (sender.walletBalance < total) throw BadRequest('Insufficient balance');
+      const recipient = await tx.employee.findFirst({
+        where: { phone: recipientPhone, status: 'ACTIVE' },
+      });
+      if (!recipient) throw NotFound('RECIPIENT_NOT_FOUND');
+      if (recipient.id === sender.id) throw BadRequest('CANNOT_TRANSFER_TO_SELF');
 
-    const [updatedSender, , senderTx] = await prisma.$transaction([
-      prisma.employee.update({
+      const fee = sender.plan === 'LUXURY' ? 0 : env.P2P_TRANSFER_FEE;
+      const total = amount + fee;
+      if (sender.walletBalance < total) throw BadRequest('INSUFFICIENT_BALANCE');
+
+      await tx.employee.update({
         where: { id: sender.id },
         data: { walletBalance: { decrement: total } },
-      }),
-      prisma.employee.update({
+      });
+      await tx.employee.update({
         where: { id: recipient.id },
         data: { walletBalance: { increment: amount } },
-      }),
-      prisma.employeeTransaction.create({
+      });
+
+      // Double-entry record. The sender row carries a negative `amount` to
+      // make ledger sums trivial; `totalAmount` is also negative for symmetry.
+      const senderTxn = await tx.employeeTransaction.create({
         data: {
           employeeId: sender.id,
           type: 'TRANSFER',
-          amount,
+          amount: -amount,
           fee,
-          totalAmount: total,
+          totalAmount: -total,
           status: 'COMPLETED',
-          description: `Transfer to ${recipient.phone}`,
+          description: `P2P to ${recipient.phone}`,
           counterpartyId: recipient.id,
           counterpartyPhone: recipient.phone,
+          idempotencyKey: idempotencyKey ?? null,
         },
-      }),
-      prisma.employeeTransaction.create({
+      });
+      await tx.employeeTransaction.create({
         data: {
           employeeId: recipient.id,
           type: 'RECEIVE',
           amount,
+          fee: 0,
           totalAmount: amount,
           status: 'COMPLETED',
-          description: `Transfer from ${sender.phone}`,
+          description: `P2P from ${sender.phone}`,
           counterpartyId: sender.id,
           counterpartyPhone: sender.phone,
         },
-      }),
-    ]);
+      });
 
-    await Promise.all([
-      notificationService.notifyTransferReceived(recipient.id, amount, sender.fullName),
-      notificationService.notifyTransferSent(sender.id, amount, recipient.fullName),
-      referralsService.maybeReward(recipient.id, amount),
-    ]);
+      // Side-effects (best-effort, after the DB tx).
+      void Promise.all([
+        enqueueNotification({
+          kind: 'transfer-sent',
+          employeeId: sender.id,
+          amount,
+          recipientName: recipient.fullName,
+        }),
+        enqueueNotification({
+          kind: 'transfer-received',
+          employeeId: recipient.id,
+          amount,
+          senderName: sender.fullName,
+        }),
+        referralsService.maybeReward(recipient.id, amount),
+      ]);
 
-    return {
-      transactionId: senderTx.id,
-      balance: updatedSender.walletBalance,
-      fee,
-    };
-  },
+      return {
+        success: true,
+        transactionId: senderTxn.id,
+        balance: sender.walletBalance - total,
+        fee,
+      };
+    });
+  }
 
+  /** Generic credit helper used by payroll, cashback, etc. */
   async credit(
     tx: Prisma.TransactionClient,
     employeeId: string,
     amount: number,
-    type: Prisma.EmployeeTransactionCreateInput['type'],
+    type: TransactionType,
     description: string,
     reference?: string,
   ) {
@@ -110,5 +196,12 @@ export const walletService = {
         reference,
       },
     });
-  },
-};
+  }
+
+  /** Forbidden helper kept on the service for symmetry with the previous API. */
+  protected forbid(): never {
+    throw Forbidden();
+  }
+}
+
+export const walletService = new WalletService();

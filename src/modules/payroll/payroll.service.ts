@@ -1,15 +1,17 @@
-import { Prisma } from '@prisma/client';
+import { Prisma, EmployeeStatus } from '@prisma/client';
 import { prisma } from '@config/prisma';
 import { BadRequest, Conflict, Forbidden, NotFound } from '@shared/utils/errors';
 import { generateReferralCode } from '@shared/utils/referralCode';
+import logger from '@shared/utils/logger';
 import { twilioService } from '@modules/auth/twilio.service';
 import { cardsService } from '@modules/cards/cards.service';
-import { notificationService } from '@modules/notifications/notification.service';
+import { enqueueNotification } from '@modules/notifications/notification.job';
 import { AddEmployeeDto, SchedulePayrollDto } from './payroll.dto';
+import { enqueuePayrollJob } from './payroll.job';
 
 type AmountMap = Record<string, number>;
 
-export const payrollService = {
+export class PayrollService {
   // ----------------------------------------------------------- Company ops
 
   async getCompanyBalance(companyId: string): Promise<number> {
@@ -19,7 +21,7 @@ export const payrollService = {
     });
     if (!company) throw NotFound('Company not found');
     return company.balance;
-  },
+  }
 
   async listEmployees(companyId: string) {
     return prisma.employee.findMany({
@@ -36,7 +38,7 @@ export const payrollService = {
         createdAt: true,
       },
     });
-  },
+  }
 
   async addEmployee(companyId: string, input: AddEmployeeDto) {
     const company = await prisma.company.findUnique({ where: { id: companyId } });
@@ -53,24 +55,23 @@ export const payrollService = {
         salary: input.salary,
         companyId,
         referralCode: generateReferralCode(),
-        status: 'PENDING_KYC',
+        status: EmployeeStatus.PENDING_KYC,
       },
     });
 
     try {
       await cardsService.issueVirtualCard(employee.id);
-      await prisma.employee.update({ where: { id: employee.id }, data: { status: 'ACTIVE' } });
+      await prisma.employee.update({
+        where: { id: employee.id },
+        data: { status: EmployeeStatus.ACTIVE },
+      });
     } catch {
       // status stays PENDING_KYC; can be retried by the user later
     }
 
-    await twilioService.sendSms(
-      employee.phone,
-      'Welcome to FlexPay! Download the app to access your wallet: https://flexpay.ae/download',
-    );
-
+    await twilioService.sendWelcomeSMS(employee.phone);
     return employee;
-  },
+  }
 
   async updateEmployee(
     companyId: string,
@@ -79,16 +80,20 @@ export const payrollService = {
   ) {
     const employee = await prisma.employee.findUnique({ where: { id: employeeId } });
     if (!employee) throw NotFound('Employee not found');
-    if (employee.companyId !== companyId) throw Forbidden('Employee does not belong to this company');
+    if (employee.companyId !== companyId) {
+      throw Forbidden('Employee does not belong to this company');
+    }
     return prisma.employee.update({ where: { id: employeeId }, data: patch });
-  },
+  }
 
   async removeEmployee(companyId: string, employeeId: string) {
     const employee = await prisma.employee.findUnique({ where: { id: employeeId } });
     if (!employee) throw NotFound('Employee not found');
-    if (employee.companyId !== companyId) throw Forbidden('Employee does not belong to this company');
+    if (employee.companyId !== companyId) {
+      throw Forbidden('Employee does not belong to this company');
+    }
     await prisma.employee.update({ where: { id: employeeId }, data: { companyId: null } });
-  },
+  }
 
   async report(companyId: string, year: number) {
     const start = new Date(Date.UTC(year, 0, 1));
@@ -103,121 +108,158 @@ export const payrollService = {
       buckets[m] = (buckets[m] ?? 0) + r.totalAmount;
     }
     return Array.from({ length: 12 }, (_, i) => ({ month: i + 1, total: buckets[i + 1] ?? 0 }));
-  },
+  }
 
-  // ------------------------------------------------------------- Schedule
+  // -------------------------------------------------------------- Schedule
 
-  async schedule(input: { companyId: string; createdBy: string } & SchedulePayrollDto) {
+  async schedulePayroll(input: { companyId: string; createdBy: string } & SchedulePayrollDto) {
     if (!input.employeeIds.length) throw BadRequest('At least one employee is required');
-    const company = await prisma.company.findUnique({ where: { id: input.companyId } });
-    if (!company) throw NotFound('Company not found');
 
-    const employees = await prisma.employee.findMany({
-      where: { id: { in: input.employeeIds }, companyId: input.companyId },
-      select: { id: true, salary: true },
-    });
-    if (employees.length !== input.employeeIds.length) {
-      throw BadRequest('One or more employees do not belong to this company');
-    }
+    const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      const company = await tx.company.findFirst({
+        where: { id: input.companyId, status: 'ACTIVE' },
+      });
+      if (!company) throw NotFound('COMPANY_NOT_FOUND');
 
-    const amountPerEmployee: AmountMap = {};
-    let totalAmount = 0;
-    for (const e of employees) {
-      const amt = input.amount ?? e.salary ?? 0;
-      if (amt <= 0) throw BadRequest(`Employee ${e.id} has no salary configured`);
-      amountPerEmployee[e.id] = amt;
-      totalAmount += amt;
-    }
+      const employees = await tx.employee.findMany({
+        where: { id: { in: input.employeeIds }, companyId: input.companyId, status: 'ACTIVE' },
+        select: { id: true, salary: true },
+      });
+      if (employees.length !== input.employeeIds.length) {
+        throw BadRequest('INVALID_EMPLOYEE_SELECTION');
+      }
 
-    if (company.balance < totalAmount) {
-      throw BadRequest(
-        `Insufficient company balance: required AED ${totalAmount}, available AED ${company.balance}`,
-      );
-    }
+      const amountPerEmployee: AmountMap = {};
+      let totalAmount = 0;
+      for (const e of employees) {
+        const amt = input.amount ?? e.salary ?? 0;
+        if (amt <= 0) throw BadRequest(`Employee ${e.id} has no salary configured`);
+        amountPerEmployee[e.id] = amt;
+        totalAmount += amt;
+      }
 
-    const payroll = await prisma.scheduledPayroll.create({
-      data: {
-        companyId: input.companyId,
-        employeeIds: input.employeeIds,
-        amountPerEmployee: amountPerEmployee as Prisma.InputJsonValue,
-        totalAmount,
-        scheduledDate: input.date,
-        createdBy: input.createdBy,
-      },
-    });
+      if (company.balance < totalAmount) {
+        throw BadRequest(
+          `INSUFFICIENT_COMPANY_BALANCE: required AED ${totalAmount}, available AED ${company.balance}`,
+        );
+      }
 
-    return { id: payroll.id, totalAmount };
-  },
+      const payroll = await tx.scheduledPayroll.create({
+        data: {
+          companyId: input.companyId,
+          employeeIds: input.employeeIds,
+          amountPerEmployee: amountPerEmployee as Prisma.InputJsonValue,
+          totalAmount,
+          scheduledDate: input.date,
+          createdBy: input.createdBy,
+        },
+      });
 
-  // ------------------------------------------------------------ Processor
-
-  async processDuePayrolls(now: Date = new Date()) {
-    const due = await prisma.scheduledPayroll.findMany({
-      where: { status: 'PENDING', scheduledDate: { lte: now } },
+      return { payroll, totalAmount };
     });
 
-    const results: { id: string; status: 'COMPLETED' | 'FAILED'; reason?: string }[] = [];
+    // Schedule the Bull job *outside* the DB transaction. If the queue
+    // enqueue fails, the daily cron sweep will still pick the row up.
+    const delayMs = Math.max(0, input.date.getTime() - Date.now());
+    await enqueuePayrollJob(result.payroll.id, delayMs);
 
-    for (const payroll of due) {
-      try {
-        await prisma.scheduledPayroll.update({
-          where: { id: payroll.id },
-          data: { status: 'PROCESSING' },
-        });
+    return { payrollId: result.payroll.id, totalAmount: result.totalAmount };
+  }
 
-        await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-          const company = await tx.company.findUnique({ where: { id: payroll.companyId } });
-          if (!company) throw new Error('Company not found');
-          if (company.balance < payroll.totalAmount) throw new Error('Insufficient company balance');
+  // ------------------------------------------------------------- Process
 
-          await tx.company.update({
-            where: { id: payroll.companyId },
-            data: { balance: { decrement: payroll.totalAmount } },
-          });
+  /** Process a single payroll by id (called from the Bull worker). */
+  async processPayroll(payrollId: string) {
+    const payroll = await prisma.scheduledPayroll.findUnique({
+      where: { id: payrollId },
+      include: { company: true },
+    });
 
-          const amounts = payroll.amountPerEmployee as AmountMap;
-          for (const employeeId of payroll.employeeIds) {
-            const amt = amounts[employeeId];
-            await tx.employee.update({
-              where: { id: employeeId },
-              data: { walletBalance: { increment: amt } },
-            });
-            await tx.employeeTransaction.create({
-              data: {
-                employeeId,
-                type: 'PAYROLL',
-                amount: amt,
-                totalAmount: amt,
-                status: 'COMPLETED',
-                description: 'Salary credit',
-                reference: payroll.id,
-                payrollId: payroll.id,
-              },
-            });
-          }
+    if (!payroll || payroll.status === 'COMPLETED') return { success: true, processedCount: 0 };
+    if (payroll.status === 'PROCESSING') {
+      logger.warn('payroll already processing, skipping', { payrollId });
+      return { success: false, reason: 'IN_PROGRESS' };
+    }
 
-          await tx.scheduledPayroll.update({
-            where: { id: payroll.id },
-            data: { status: 'COMPLETED', processedAt: new Date() },
-          });
+    await prisma.scheduledPayroll.update({
+      where: { id: payrollId },
+      data: { status: 'PROCESSING' },
+    });
+
+    try {
+      const amounts = payroll.amountPerEmployee as AmountMap;
+
+      await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        await tx.company.update({
+          where: { id: payroll.companyId },
+          data: { balance: { decrement: payroll.totalAmount } },
         });
 
         for (const employeeId of payroll.employeeIds) {
-          const amt = (payroll.amountPerEmployee as AmountMap)[employeeId];
-          await notificationService.notifySalaryCredited(employeeId, amt);
+          const amt = amounts[employeeId];
+          await tx.employee.update({
+            where: { id: employeeId },
+            data: { walletBalance: { increment: amt } },
+          });
+          await tx.employeeTransaction.create({
+            data: {
+              employeeId,
+              type: 'PAYROLL',
+              amount: amt,
+              totalAmount: amt,
+              status: 'COMPLETED',
+              description: `Salary - ${payroll.company.name}`,
+              reference: `payroll:${payroll.id}`,
+              payrollId: payroll.id,
+            },
+          });
         }
 
-        results.push({ id: payroll.id, status: 'COMPLETED' });
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : 'unknown';
-        await prisma.scheduledPayroll.update({
-          where: { id: payroll.id },
-          data: { status: 'FAILED', failureReason: reason },
+        await tx.scheduledPayroll.update({
+          where: { id: payrollId },
+          data: { status: 'COMPLETED', processedAt: new Date() },
         });
-        results.push({ id: payroll.id, status: 'FAILED', reason });
+      });
+
+      // Side-effects after commit
+      for (const employeeId of payroll.employeeIds) {
+        await enqueueNotification({
+          kind: 'salary-credited',
+          employeeId,
+          amount: amounts[employeeId],
+          companyName: payroll.company.name,
+        });
+      }
+
+      return { success: true, processedCount: payroll.employeeIds.length };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'unknown';
+      await prisma.scheduledPayroll.update({
+        where: { id: payrollId },
+        data: { status: 'FAILED', failureReason: reason },
+      });
+      throw err;
+    }
+  }
+
+  /** Cron sweep: pick up any PENDING payrolls past their scheduled date. */
+  async processDuePayrolls(now: Date = new Date()) {
+    const due = await prisma.scheduledPayroll.findMany({
+      where: { status: 'PENDING', scheduledDate: { lte: now } },
+      select: { id: true },
+    });
+
+    const results: { id: string; ok: boolean; error?: string }[] = [];
+    for (const { id } of due) {
+      try {
+        await this.processPayroll(id);
+        results.push({ id, ok: true });
+      } catch (err) {
+        results.push({ id, ok: false, error: err instanceof Error ? err.message : 'unknown' });
       }
     }
-
     return results;
-  },
-};
+  }
+}
+
+export const payrollService = new PayrollService();

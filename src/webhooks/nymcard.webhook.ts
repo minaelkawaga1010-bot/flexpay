@@ -1,30 +1,17 @@
 import { Router, Request, Response } from 'express';
-import crypto from 'crypto';
 import { env } from '@config/env';
 import { prisma } from '@config/prisma';
 import logger from '@shared/utils/logger';
 import { asyncHandler } from '@shared/utils/asyncHandler';
 import { Unauthorized } from '@shared/utils/errors';
 import { cashbackService } from '@modules/cashback/cashback.service';
-import { notificationService } from '@modules/notifications/notification.service';
+import { nymcardService } from '@modules/cards/nymcard.service';
+import { enqueueNotification } from '@modules/notifications/notification.job';
 
 const router = Router();
 
-function verifySignature(rawBody: Buffer, signatureHeader: string | undefined): boolean {
-  if (!env.NYMCARD_WEBHOOK_SECRET) return true;
-  if (!signatureHeader) return false;
-  const [scheme, sig] = signatureHeader.split('=');
-  if (scheme !== 'sha256' || !sig) return false;
-  const expected = crypto
-    .createHmac('sha256', env.NYMCARD_WEBHOOK_SECRET)
-    .update(rawBody)
-    .digest('hex');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
-  } catch {
-    return false;
-  }
-}
+const verifySignature = (rawBody: Buffer, signatureHeader: string | undefined): boolean =>
+  nymcardService.verifyWebhookSignature(rawBody, signatureHeader);
 
 router.post(
   '/transaction',
@@ -78,7 +65,11 @@ router.post(
       data: { trackingNumber, shippingStatus: status },
     });
     if (trackingNumber) {
-      await notificationService.notifyTrackingNumber(card.employeeId, trackingNumber);
+      await enqueueNotification({
+        kind: 'tracking',
+        employeeId: card.employeeId,
+        trackingNumber,
+      });
     }
     res.sendStatus(200);
   }),

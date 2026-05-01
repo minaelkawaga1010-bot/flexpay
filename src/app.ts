@@ -1,4 +1,5 @@
 import express, { Express } from 'express';
+import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
@@ -15,7 +16,8 @@ export function createApp(): Express {
 
   app.disable('x-powered-by');
   app.use(helmet());
-  app.use(cors());
+  app.use(cors({ credentials: true, origin: true }));
+  app.use(cookieParser());
   app.use(compression());
   if (!isTest) app.use(morgan(isProd ? 'combined' : 'dev'));
 

@@ -1,37 +1,77 @@
 import { z } from 'zod';
-import { phoneSchema, emailSchema, passwordSchema } from '@shared/middleware/validator';
+import {
+  phoneSchema,
+  emailSchema,
+  passwordSchema,
+  amountSchema,
+} from '@shared/middleware/validator';
+
+// =====================================================================
+// Employee Auth
+// =====================================================================
 
 export const requestOtpSchema = z.object({
   phone: phoneSchema,
 });
-export type RequestOtpDto = z.infer<typeof requestOtpSchema>;
 
 export const verifyOtpSchema = z.object({
   phone: phoneSchema,
-  otp: z.string().regex(/^\d{6}$/),
-  fullName: z.string().min(2),
-  salary: z.number().nonnegative().optional(),
+  otp: z.string().length(6, 'OTP must be 6 digits').regex(/^\d{6}$/),
+  fullName: z.string().min(2).max(100),
+  salary: amountSchema.optional(),
   companyId: z.string().uuid().optional(),
-  referralCode: z.string().optional(),
+  // Referrer's referral code is a cuid by default. Allow either format
+  // because legacy/manual codes may use the alphanumeric helper format.
+  referralCode: z
+    .string()
+    .min(6)
+    .max(40)
+    .optional(),
 });
-export type VerifyOtpDto = z.infer<typeof verifyOtpSchema>;
 
-export const registerCompanySchema = z.object({
-  name: z.string().min(2),
-  tradeLicense: z.string().min(3),
-  adminName: z.string().min(2),
+// =====================================================================
+// Company Auth
+// =====================================================================
+
+export const companyRegisterSchema = z.object({
+  name: z.string().min(2).max(100),
+  tradeLicense: z.string().min(5).max(50),
+  adminName: z.string().min(2).max(100),
   adminEmail: emailSchema,
   adminPhone: phoneSchema,
   password: passwordSchema,
 });
-export type RegisterCompanyDto = z.infer<typeof registerCompanySchema>;
 
-export const loginCompanySchema = z.object({
+export const companyLoginSchema = z.object({
   email: emailSchema,
-  password: z.string().min(1),
+  password: z.string().min(1, 'Password is required'),
 });
-export type LoginCompanyDto = z.infer<typeof loginCompanySchema>;
+
+// =====================================================================
+// Token refresh
+// =====================================================================
 
 export const refreshTokenSchema = z.object({
-  refreshToken: z.string().min(10),
+  refreshToken: z.string().min(1).optional(),
 });
+
+// =====================================================================
+// Response shapes
+// =====================================================================
+
+export interface AuthResponse {
+  accessToken: string;
+  refreshToken: string;
+  user: {
+    id: string;
+    role: 'employee' | 'company';
+    phone?: string;
+    email?: string;
+    fullName?: string;
+    balance?: number;
+    companyId?: string | null;
+    plan?: string;
+    status?: string;
+    virtualCardLast4?: string | null;
+  };
+}

@@ -3,7 +3,6 @@ import { authenticate } from '@shared/middleware/auth';
 import { transferRateLimiter } from '@shared/middleware/rate-limit';
 import { validate } from '@shared/middleware/validator';
 import { asyncHandler } from '@shared/utils/asyncHandler';
-import { idempotency } from '@shared/utils/idempotency';
 import { transactionsQuerySchema, transferSchema } from './wallet.dto';
 import { walletController } from './wallet.controller';
 
@@ -19,10 +18,11 @@ router.get(
   asyncHandler(walletController.listTransactions),
 );
 
+// Idempotency is enforced at the service level via the unique
+// EmployeeTransaction.idempotencyKey index — no middleware-level cache needed.
 router.post(
   '/transfer',
   transferRateLimiter,
-  idempotency,
   validate(transferSchema),
   asyncHandler(walletController.transfer),
 );

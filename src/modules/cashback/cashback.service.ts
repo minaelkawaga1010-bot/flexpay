@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@config/prisma';
 import { env } from '@config/env';
 import { roundCurrency } from '@shared/utils/currency';
-import { notificationService } from '@modules/notifications/notification.service';
+import { enqueueNotification } from '@modules/notifications/notification.job';
 
 export const cashbackService = {
   /**
@@ -50,7 +50,7 @@ export const cashbackService = {
       });
     });
 
-    await notificationService.notifyCashback(employeeId, cashbackAmount);
+    await enqueueNotification({ kind: 'cashback', employeeId, amount: cashbackAmount });
     return cashbackAmount;
   },
 };

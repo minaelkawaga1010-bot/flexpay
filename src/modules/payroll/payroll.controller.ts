@@ -29,7 +29,7 @@ export const payrollController = {
   },
 
   async schedule(req: AuthRequest, res: Response): Promise<void> {
-    const result = await payrollService.schedule({
+    const result = await payrollService.schedulePayroll({
       companyId: req.user!.id,
       createdBy: req.user!.id,
       employeeIds: req.body.employeeIds,

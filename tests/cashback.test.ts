@@ -13,8 +13,8 @@ jest.mock('@config/prisma', () => {
   };
 });
 
-jest.mock('@modules/notifications/notification.service', () => ({
-  notificationService: { notifyCashback: jest.fn().mockResolvedValue(undefined) },
+jest.mock('@modules/notifications/notification.job', () => ({
+  enqueueNotification: jest.fn().mockResolvedValue(undefined),
 }));
 
 import { cashbackService } from '@modules/cashback/cashback.service';
