@@ -1,111 +1,181 @@
+import { Employee, EmployeeStatus } from '@prisma/client';
 import { prisma } from '@config/prisma';
-import redisService from '@config/redis';
 import logger from '@shared/utils/logger';
+import { NotFound } from '@shared/utils/errors';
 
-const CACHE_TTL_SECONDS = 24 * 60 * 60;
-const SCORE_BASE = 50;
-
-export interface CreditScoreBreakdown {
+export interface CreditScoreResponse {
   score: number;
-  components: {
+  breakdown: {
     base: number;
-    transactionRegularity: number;
-    averageBalance: number;
+    transactions: number;
+    balance: number;
     referrals: number;
     defaults: number;
   };
   eligibleForEWA: boolean;
   maxEWAAmount: number;
+  computedAt: Date;
+  nextReviewAt: Date;
 }
 
-const memoryCache = new Map<string, { value: CreditScoreBreakdown; expiresAt: number }>();
-
-const cacheKey = (employeeId: string) => `credit-score:${employeeId}`;
-
-async function readCache(employeeId: string): Promise<CreditScoreBreakdown | null> {
-  try {
-    const raw = await redisService.get(cacheKey(employeeId));
-    if (raw) return JSON.parse(raw) as CreditScoreBreakdown;
-  } catch (err) {
-    logger.warn('credit-score: cache read failed', { error: (err as Error).message });
-  }
-  const entry = memoryCache.get(cacheKey(employeeId));
-  if (!entry) return null;
-  if (entry.expiresAt < Date.now()) {
-    memoryCache.delete(cacheKey(employeeId));
-    return null;
-  }
-  return entry.value;
+interface ComputeFactors {
+  transactionCount: number;
+  successfulReferrals: number;
+  defaultedLoans: number;
+  balance: number;
 }
 
-async function writeCache(employeeId: string, value: CreditScoreBreakdown): Promise<void> {
-  try {
-    await redisService.set(cacheKey(employeeId), JSON.stringify(value), CACHE_TTL_SECONDS);
-  } catch (err) {
-    logger.warn('credit-score: cache write failed', { error: (err as Error).message });
-  }
-  memoryCache.set(cacheKey(employeeId), { value, expiresAt: Date.now() + CACHE_TTL_SECONDS * 1000 });
-}
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
-export const scoringService = {
+export class CreditScoringService {
+  private readonly config = {
+    baseScore: 50,
+    transactionThresholds: [
+      { count: 20, points: 20 },
+      { count: 10, points: 10 },
+      { count: 5, points: 5 },
+    ],
+    balanceThresholds: [
+      { amount: 500, points: 15 },
+      { amount: 200, points: 10 },
+      { amount: 100, points: 5 },
+    ],
+    referralThresholds: [
+      { count: 3, points: 10 },
+      { count: 1, points: 5 },
+    ],
+    defaultPenalty: 15,
+  };
+
   /**
-   * Compute a 0-100 credit score for an employee using a rule-based model.
-   * Server-side only — no client input — and cached for 24h to deter probing.
+   * Compute the credit score for an employee. Cached for 24h on the
+   * Employee row itself (`creditScore` + `creditScoreUpdatedAt`) — server
+   * authoritative, no client input.
    */
-  async compute(employeeId: string, opts: { skipCache?: boolean } = {}): Promise<CreditScoreBreakdown> {
-    if (!opts.skipCache) {
-      const cached = await readCache(employeeId);
-      if (cached) return cached;
+  async computeScore(employeeId: string, forceRefresh = false): Promise<CreditScoreResponse> {
+    const employee = await prisma.employee.findUnique({ where: { id: employeeId } });
+    if (!employee) throw NotFound('EMPLOYEE_NOT_FOUND');
+
+    if (!forceRefresh && employee.creditScore !== null && employee.creditScoreUpdatedAt) {
+      const age = Date.now() - employee.creditScoreUpdatedAt.getTime();
+      if (age < CACHE_TTL_MS) {
+        const factors = await this.collectFactors(employeeId, employee.walletBalance);
+        const breakdown = this.deriveBreakdown(factors);
+        return this.buildResponse(employee, employee.creditScore, breakdown, employee.creditScoreUpdatedAt);
+      }
     }
 
+    const factors = await this.collectFactors(employeeId, employee.walletBalance);
+    const breakdown = this.deriveBreakdown(factors);
+    const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
+    const score = Math.min(100, Math.max(0, total));
+
+    const updated = await prisma.employee.update({
+      where: { id: employeeId },
+      data: { creditScore: score, creditScoreUpdatedAt: new Date() },
+    });
+
+    return this.buildResponse(updated, score, breakdown, updated.creditScoreUpdatedAt!);
+  }
+
+  async invalidate(employeeId: string): Promise<void> {
+    await prisma.employee.update({
+      where: { id: employeeId },
+      data: { creditScoreUpdatedAt: null },
+    });
+  }
+
+  /** Refresh stale scores in the background — runs on a daily cron. */
+  async batchUpdateScores(): Promise<{ refreshed: number; failed: number }> {
+    const stale = await prisma.employee.findMany({
+      where: {
+        status: EmployeeStatus.ACTIVE,
+        OR: [
+          { creditScoreUpdatedAt: null },
+          { creditScoreUpdatedAt: { lte: new Date(Date.now() - CACHE_TTL_MS) } },
+        ],
+      },
+      select: { id: true },
+    });
+
+    logger.info('Batch updating credit scores', { count: stale.length });
+
+    let refreshed = 0;
+    let failed = 0;
+    for (const { id } of stale) {
+      try {
+        await this.computeScore(id, true);
+        refreshed++;
+      } catch (err) {
+        failed++;
+        logger.error('credit score refresh failed', {
+          employeeId: id,
+          error: (err as Error).message,
+        });
+      }
+      // Light pacing so we don't saturate Postgres on huge tables.
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    return { refreshed, failed };
+  }
+
+  // --------------------------------------------------------- internals
+
+  private async collectFactors(employeeId: string, balance: number): Promise<ComputeFactors> {
     const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
 
-    const [employee, transactionCount, referralCount, defaultedLoans] = await Promise.all([
-      prisma.employee.findUnique({ where: { id: employeeId } }),
+    const [transactionCount, successfulReferrals, defaultedLoans] = await Promise.all([
       prisma.employeeTransaction.count({
         where: {
           employeeId,
           createdAt: { gte: ninetyDaysAgo },
           status: 'COMPLETED',
-          type: { in: ['DEPOSIT', 'WITHDRAWAL', 'TRANSFER', 'RECEIVE'] },
+          type: { in: ['DEPOSIT', 'WITHDRAWAL', 'TRANSFER', 'RECEIVE', 'CARD_PURCHASE'] },
         },
       }),
-      prisma.referral.count({ where: { referrerId: employeeId } }),
+      prisma.referral.count({ where: { referrerId: employeeId, rewardGiven: true } }),
       prisma.loan.count({ where: { employeeId, status: 'DEFAULTED' } }),
     ]);
 
-    const avgBalance = employee?.walletBalance ?? 0;
-    const salary = employee?.salary ?? 0;
+    return { transactionCount, successfulReferrals, defaultedLoans, balance };
+  }
 
-    const components = {
-      base: SCORE_BASE,
-      transactionRegularity:
-        transactionCount >= 20 ? 20 : transactionCount >= 10 ? 10 : transactionCount >= 5 ? 5 : 0,
-      averageBalance: avgBalance >= 500 ? 15 : avgBalance >= 200 ? 10 : avgBalance >= 100 ? 5 : 0,
-      referrals: referralCount >= 3 ? 10 : referralCount >= 1 ? 5 : 0,
-      defaults: -defaultedLoans * 15,
+  private deriveBreakdown(f: ComputeFactors): CreditScoreResponse['breakdown'] {
+    const find = <T extends { points: number }>(rules: T[], pred: (r: T) => boolean) =>
+      rules.find(pred)?.points ?? 0;
+
+    return {
+      base: this.config.baseScore,
+      transactions: find(this.config.transactionThresholds, (t) => f.transactionCount >= t.count),
+      balance: find(this.config.balanceThresholds, (t) => f.balance >= t.amount),
+      referrals: find(this.config.referralThresholds, (t) => f.successfulReferrals >= t.count),
+      defaults: -f.defaultedLoans * this.config.defaultPenalty,
     };
+  }
 
-    const total = Object.values(components).reduce((a, b) => a + b, 0);
-    const score = Math.min(100, Math.max(0, total));
-    const eligibleForEWA = score >= 60;
-    const maxEWAAmount = eligibleForEWA ? Math.min(Math.round(salary * 0.5 * 100) / 100, 5000) : 0;
+  private buildResponse(
+    employee: Employee,
+    score: number,
+    breakdown: CreditScoreResponse['breakdown'],
+    computedAt: Date,
+  ): CreditScoreResponse {
+    const eligibleForEWA = score >= 60 && employee.status === EmployeeStatus.ACTIVE;
 
-    const breakdown: CreditScoreBreakdown = { score, components, eligibleForEWA, maxEWAAmount };
+    // Max EWA = (30% + (score / 100) * 20%) of salary, capped at 2000 AED.
+    const salary = employee.salary ?? 0;
+    const multiplier = 0.3 + (score / 100) * 0.2;
+    const maxEWAAmount = eligibleForEWA ? Math.min(Math.round(salary * multiplier), 2000) : 0;
 
-    if (employee) {
-      await prisma.employee.update({
-        where: { id: employeeId },
-        data: { creditScore: score, creditScoreUpdatedAt: new Date() },
-      });
-    }
+    return {
+      score,
+      breakdown,
+      eligibleForEWA,
+      maxEWAAmount,
+      computedAt,
+      nextReviewAt: new Date(computedAt.getTime() + CACHE_TTL_MS),
+    };
+  }
+}
 
-    await writeCache(employeeId, breakdown);
-    return breakdown;
-  },
-
-  async invalidate(employeeId: string): Promise<void> {
-    await redisService.del(cacheKey(employeeId));
-    memoryCache.delete(cacheKey(employeeId));
-  },
-};
+export const creditScoringService = new CreditScoringService();

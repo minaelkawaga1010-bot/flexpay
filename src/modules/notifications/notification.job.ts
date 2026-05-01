@@ -1,5 +1,4 @@
-import { Queue } from 'bull';
-import { createQueue } from '@config/bull';
+import { notificationQueue } from '@config/bull';
 import logger from '@shared/utils/logger';
 import { notificationService } from './notification.service';
 
@@ -10,18 +9,14 @@ export type NotificationJob =
   | { kind: 'cashback'; employeeId: string; amount: number }
   | { kind: 'tracking'; employeeId: string; trackingNumber: string };
 
-export const NOTIFICATION_QUEUE_NAME = 'notifications';
+let workerInstalled = false;
 
-let queue: Queue<NotificationJob> | null = null;
-let initialised = false;
+export function startNotificationWorker(): void {
+  if (workerInstalled) return;
+  workerInstalled = true;
 
-export function getNotificationQueue(): Queue<NotificationJob> {
-  if (queue && initialised) return queue;
-  queue = createQueue<NotificationJob>(NOTIFICATION_QUEUE_NAME);
-  initialised = true;
-
-  queue.process(async (job) => {
-    const data = job.data;
+  notificationQueue.process(async (job) => {
+    const data = job.data as NotificationJob;
     switch (data.kind) {
       case 'salary-credited':
         return notificationService.notifySalaryCredited(data.employeeId, data.amount);
@@ -36,22 +31,21 @@ export function getNotificationQueue(): Queue<NotificationJob> {
     }
   });
 
-  queue.on('failed', (job, err) => {
+  notificationQueue.on('failed', (job, err) => {
     logger.error('notification job failed', {
       jobId: job.id,
-      kind: job.data.kind,
+      kind: (job.data as NotificationJob).kind,
       error: err.message,
     });
   });
-
-  return queue;
 }
 
-/** Enqueue a notification. Falls back to in-process delivery in test env. */
+/** Enqueue a notification. No-op in test env so unit tests don't open Redis. */
 export async function enqueueNotification(job: NotificationJob): Promise<void> {
-  if (process.env.NODE_ENV === 'test') {
-    // Avoid spinning up a Bull worker during unit tests.
-    return;
-  }
-  await getNotificationQueue().add(job, { attempts: 5, backoff: { type: 'exponential', delay: 5000 } });
+  if (process.env.NODE_ENV === 'test') return;
+  startNotificationWorker();
+  await notificationQueue.add(job, {
+    attempts: 5,
+    backoff: { type: 'exponential', delay: 5000 },
+  });
 }

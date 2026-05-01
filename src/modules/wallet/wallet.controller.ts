@@ -1,15 +1,37 @@
-import { Response } from 'express';
+import { Response, Router } from 'express';
 import { TransactionType } from '@prisma/client';
-import { AuthRequest } from '@shared/middleware/auth';
+import { authenticate, AuthRequest } from '@shared/middleware/auth';
+import { transferRateLimiter } from '@shared/middleware/rate-limit';
+import { validate } from '@shared/middleware/validator';
+import { asyncHandler } from '@shared/utils/asyncHandler';
 import { walletService } from './wallet.service';
+import { transactionsQuerySchema, transferSchema } from './wallet.dto';
 
-export const walletController = {
-  async getBalance(req: AuthRequest, res: Response): Promise<void> {
+export class WalletController {
+  public readonly router = Router();
+
+  constructor() {
+    this.router.use(authenticate('employee'));
+    this.router.get('/balance', asyncHandler(this.getBalance));
+    this.router.get(
+      '/transactions',
+      validate(transactionsQuerySchema, 'query'),
+      asyncHandler(this.listTransactions),
+    );
+    this.router.post(
+      '/transfer',
+      transferRateLimiter,
+      validate(transferSchema),
+      asyncHandler(this.transfer),
+    );
+  }
+
+  private getBalance = async (req: AuthRequest, res: Response): Promise<void> => {
     const balance = await walletService.getBalance(req.user!.id);
     res.json({ balance });
-  },
+  };
 
-  async listTransactions(req: AuthRequest, res: Response): Promise<void> {
+  private listTransactions = async (req: AuthRequest, res: Response): Promise<void> => {
     const { limit, offset, type, startDate, endDate } = req.query as Record<string, unknown>;
     const result = await walletService.getTransactions(req.user!.id, {
       limit: limit ? Number(limit) : undefined,
@@ -19,9 +41,9 @@ export const walletController = {
       endDate: endDate as Date | string | undefined,
     });
     res.json(result);
-  },
+  };
 
-  async transfer(req: AuthRequest, res: Response): Promise<void> {
+  private transfer = async (req: AuthRequest, res: Response): Promise<void> => {
     const result = await walletService.transfer({
       senderId: req.user!.id,
       recipientPhone: req.body.recipientPhone,
@@ -29,5 +51,7 @@ export const walletController = {
       idempotencyKey: req.header('idempotency-key') ?? undefined,
     });
     res.json(result);
-  },
-};
+  };
+}
+
+export const walletController = new WalletController();

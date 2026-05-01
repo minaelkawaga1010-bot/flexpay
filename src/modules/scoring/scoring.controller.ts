@@ -1,17 +1,23 @@
-import { Router } from 'express';
+import { Response, Router } from 'express';
 import { authenticate, AuthRequest } from '@shared/middleware/auth';
 import { asyncHandler } from '@shared/utils/asyncHandler';
-import { scoringService } from './scoring.service';
+import { creditScoringService } from './scoring.service';
 
-const router = Router();
+export class ScoringController {
+  public readonly router = Router();
 
-router.get(
-  '/credit-score',
-  authenticate('employee'),
-  asyncHandler(async (req: AuthRequest, res) => {
-    const score = await scoringService.compute(req.user!.id);
+  constructor() {
+    this.router.get(
+      '/score',
+      authenticate('employee'),
+      asyncHandler(this.getScore),
+    );
+  }
+
+  private getScore = async (req: AuthRequest, res: Response): Promise<void> => {
+    const score = await creditScoringService.computeScore(req.user!.id);
     res.json(score);
-  }),
-);
+  };
+}
 
-export default router;
+export const scoringController = new ScoringController();

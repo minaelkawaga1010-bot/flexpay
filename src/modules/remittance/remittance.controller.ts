@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Response, Router } from 'express';
 import { z } from 'zod';
 import { authenticate, AuthRequest } from '@shared/middleware/auth';
 import { validate } from '@shared/middleware/validator';
@@ -6,27 +6,10 @@ import { asyncHandler } from '@shared/utils/asyncHandler';
 import { idempotency } from '@shared/utils/idempotency';
 import { remittanceService } from './remittance.service';
 
-const router = Router();
-router.use(authenticate('employee'));
-
 const quoteQuery = z.object({
   amount: z.coerce.number().positive(),
   currency: z.string().length(3),
 });
-
-router.get(
-  '/quote',
-  validate(quoteQuery, 'query'),
-  asyncHandler(async (req: AuthRequest, res) => {
-    const amount = Number(req.query.amount);
-    const currency = String(req.query.currency).toUpperCase();
-    const quote = await remittanceService.quote(amount, currency);
-    res.json({
-      ...quote,
-      disclaimer: 'Estimated amount. Final delivered value may vary based on FX at settlement.',
-    });
-  }),
-);
 
 const sendSchema = z.object({
   amount: z.number().positive(),
@@ -38,11 +21,26 @@ const sendSchema = z.object({
   }),
 });
 
-router.post(
-  '/send',
-  idempotency,
-  validate(sendSchema),
-  asyncHandler(async (req: AuthRequest, res) => {
+export class RemittanceController {
+  public readonly router = Router();
+
+  constructor() {
+    this.router.use(authenticate('employee'));
+    this.router.get('/quote', validate(quoteQuery, 'query'), asyncHandler(this.quote));
+    this.router.post('/send', idempotency, validate(sendSchema), asyncHandler(this.send));
+  }
+
+  private quote = async (req: AuthRequest, res: Response): Promise<void> => {
+    const amount = Number(req.query.amount);
+    const currency = String(req.query.currency).toUpperCase();
+    const quote = await remittanceService.quote(amount, currency);
+    res.json({
+      ...quote,
+      disclaimer: 'Estimated amount. Final delivered value may vary based on FX at settlement.',
+    });
+  };
+
+  private send = async (req: AuthRequest, res: Response): Promise<void> => {
     const result = await remittanceService.send(
       req.user!.id,
       req.body.amount,
@@ -50,7 +48,7 @@ router.post(
       req.body.beneficiary,
     );
     res.json(result);
-  }),
-);
+  };
+}
 
-export default router;
+export const remittanceController = new RemittanceController();

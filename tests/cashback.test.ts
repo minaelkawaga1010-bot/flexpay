@@ -27,45 +27,64 @@ const mocked = prisma as unknown as {
   __tx: { employee: { update: jest.Mock }; employeeTransaction: { create: jest.Mock } };
 };
 
-describe('cashbackService.credit', () => {
+describe('cashbackService.processCashback', () => {
   beforeEach(() => jest.clearAllMocks());
 
   it('credits 1% for BASIC plan and respects the 100 AED monthly cap', async () => {
-    mocked.employee.findUnique.mockResolvedValue({ id: 'e1', plan: 'BASIC' });
     mocked.employeeTransaction.aggregate.mockResolvedValue({ _sum: { amount: 0 } });
-
-    const credited = await cashbackService.credit('e1', 200, 'GROCERY');
-    expect(credited).toBe(2);
+    const result = await cashbackService.processCashback({
+      employeeId: 'e1',
+      amount: 200,
+      plan: 'BASIC',
+      merchantCategory: 'GROCERY',
+    });
+    expect(result?.awarded).toBe(2);
     expect(mocked.__tx.employeeTransaction.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ amount: 2, type: 'CASHBACK' }) }),
     );
   });
 
   it('caps cashback at remaining monthly headroom for BASIC plan', async () => {
-    mocked.employee.findUnique.mockResolvedValue({ id: 'e1', plan: 'BASIC' });
     mocked.employeeTransaction.aggregate.mockResolvedValue({ _sum: { amount: 99 } });
-    const credited = await cashbackService.credit('e1', 500, 'RESTAURANT');
-    expect(credited).toBe(1);
+    const result = await cashbackService.processCashback({
+      employeeId: 'e1',
+      amount: 500,
+      plan: 'BASIC',
+      merchantCategory: 'RESTAURANT',
+    });
+    expect(result?.awarded).toBe(1);
   });
 
-  it('returns 0 once cap is exhausted', async () => {
-    mocked.employee.findUnique.mockResolvedValue({ id: 'e1', plan: 'BASIC' });
+  it('returns 0 awarded once cap is exhausted (no DB write)', async () => {
     mocked.employeeTransaction.aggregate.mockResolvedValue({ _sum: { amount: 100 } });
-    const credited = await cashbackService.credit('e1', 500, 'RESTAURANT');
-    expect(credited).toBe(0);
+    const result = await cashbackService.processCashback({
+      employeeId: 'e1',
+      amount: 500,
+      plan: 'BASIC',
+      merchantCategory: 'RESTAURANT',
+    });
+    expect(result?.awarded).toBe(0);
     expect(mocked.$transaction).not.toHaveBeenCalled();
   });
 
   it('credits 2.5% for LUXURY plan up to 300 AED cap', async () => {
-    mocked.employee.findUnique.mockResolvedValue({ id: 'e1', plan: 'LUXURY' });
     mocked.employeeTransaction.aggregate.mockResolvedValue({ _sum: { amount: 0 } });
-    const credited = await cashbackService.credit('e1', 1000, 'TRAVEL');
-    expect(credited).toBe(25);
+    const result = await cashbackService.processCashback({
+      employeeId: 'e1',
+      amount: 1000,
+      plan: 'LUXURY',
+      merchantCategory: 'TRAVEL',
+    });
+    expect(result?.awarded).toBe(25);
   });
 
-  it('returns 0 when employee is missing', async () => {
-    mocked.employee.findUnique.mockResolvedValue(null);
-    const credited = await cashbackService.credit('missing', 100, 'X');
-    expect(credited).toBe(0);
+  it('returns null for sub-cent potential cashback', async () => {
+    const result = await cashbackService.processCashback({
+      employeeId: 'e1',
+      amount: 0.5,
+      plan: 'BASIC',
+    });
+    expect(result).toBeNull();
+    expect(mocked.$transaction).not.toHaveBeenCalled();
   });
 });

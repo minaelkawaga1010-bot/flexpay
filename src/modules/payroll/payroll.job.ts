@@ -1,56 +1,47 @@
-import { Queue } from 'bull';
-import { createQueue } from '@config/bull';
+import { payrollQueue } from '@config/bull';
 import logger from '@shared/utils/logger';
-
-export const PAYROLL_QUEUE_NAME = 'payroll';
 
 interface PayrollJob {
   payrollId?: string;
   kind: 'process-one' | 'process-due';
 }
 
-let queue: Queue<PayrollJob> | null = null;
-let initialised = false;
+let workerInstalled = false;
 
-function ensureQueue(): Queue<PayrollJob> {
-  if (queue && initialised) return queue;
-  queue = createQueue<PayrollJob>(PAYROLL_QUEUE_NAME);
-  initialised = true;
+function installWorker(): void {
+  if (workerInstalled) return;
+  workerInstalled = true;
 
-  queue.process(async (job) => {
-    // Lazy import avoids a circular dep with payroll.service.
+  payrollQueue.process(async (job) => {
+    const data = job.data as PayrollJob;
+    // Lazy import to avoid a circular dep with payroll.service.
     const { payrollService } = await import('./payroll.service');
-    if (job.data.kind === 'process-due') {
+    if (data.kind === 'process-due') {
       const results = await payrollService.processDuePayrolls();
       logger.info('payroll due-sweep completed', { count: results.length });
       return { processed: results.length };
     }
-    if (!job.data.payrollId) throw new Error('missing payrollId');
-    const result = await payrollService.processPayroll(job.data.payrollId);
-    logger.info('payroll processed', { payrollId: job.data.payrollId, result });
+    if (!data.payrollId) throw new Error('missing payrollId');
+    const result = await payrollService.processPayroll(data.payrollId);
+    logger.info('payroll processed', { payrollId: data.payrollId, result });
     return result;
   });
 
-  queue.on('failed', (job, err) => {
+  payrollQueue.on('failed', (job, err) => {
     logger.error('payroll job failed', {
       jobId: job.id,
       attempts: job.attemptsMade,
       error: err.message,
     });
   });
-
-  return queue;
-}
-
-export function getPayrollQueue(): Queue<PayrollJob> {
-  return ensureQueue();
 }
 
 /** Schedule a single payroll for processing at a specific delay. */
 export async function enqueuePayrollJob(payrollId: string, delayMs: number): Promise<void> {
   if (process.env.NODE_ENV === 'test') return;
-  await ensureQueue().add(
-    { kind: 'process-one', payrollId },
+  installWorker();
+  await payrollQueue.add(
+    { kind: 'process-one', payrollId } satisfies PayrollJob,
     {
       jobId: `payroll:${payrollId}`,
       delay: delayMs,
@@ -61,8 +52,13 @@ export async function enqueuePayrollJob(payrollId: string, delayMs: number): Pro
 /** Cron-driven sweep of any PENDING payrolls that slipped through. */
 export async function enqueueDuePayrolls(): Promise<void> {
   if (process.env.NODE_ENV === 'test') return;
-  await ensureQueue().add(
-    { kind: 'process-due' },
+  installWorker();
+  await payrollQueue.add(
+    { kind: 'process-due' } satisfies PayrollJob,
     { jobId: `due-${new Date().toISOString().slice(0, 10)}` },
   );
+}
+
+export function startPayrollWorker(): void {
+  installWorker();
 }

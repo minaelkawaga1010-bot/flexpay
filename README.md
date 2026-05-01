@@ -10,7 +10,7 @@ remittance, referrals, and push notifications.
 - **Node.js 18 + TypeScript** (Express, path aliases via `@config/*`, `@shared/*`, `@modules/*`, `@webhooks/*`)
 - **Prisma + PostgreSQL** — Prisma `$transaction` guarantees atomicity for financial flows
 - **Redis** — OTP store, rate limit counters, idempotency cache, FX rate cache, Bull queue
-- **Bull + node-cron** — payroll processor (exponential backoff, 5 attempts) and monthly auto-save (GST)
+- **Bull + node-cron** — three named queues (payroll/notifications/webhooks) with exponential backoff; centralized cron manager (GST)
 - **JWT** — separate access (15m) and refresh (7d) secrets, role-based middleware
 - **Firebase Admin** — push notifications
 - **Twilio** — SMS / OTP
