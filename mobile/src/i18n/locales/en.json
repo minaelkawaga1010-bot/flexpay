@@ -1,0 +1,82 @@
+{
+  "common": {
+    "continue": "Continue",
+    "cancel": "Cancel",
+    "ok": "OK",
+    "error": "Error",
+    "loading": "Loading…",
+    "retry": "Retry",
+    "save": "Save"
+  },
+  "auth": {
+    "phone": {
+      "title": "Enter your phone",
+      "subtitle": "We'll send a 6-digit code to verify it's you.",
+      "terms": "By continuing, you agree to our Terms of Service and Privacy Policy."
+    },
+    "otp": {
+      "title": "Verify your number",
+      "subtitle": "Enter the 6-digit code sent to {{phone}}.",
+      "verify": "Verify",
+      "resend": "Resend code",
+      "resend_wait": "Resend in {{seconds}}s",
+      "invalid_title": "Invalid code",
+      "invalid_message": "Please double-check the code and try again.",
+      "resend_failed": "Could not resend code, please try again later."
+    },
+    "profile": {
+      "title": "Tell us about you",
+      "subtitle": "We'll use this to set up your wallet.",
+      "full_name": "Full name",
+      "salary": "Monthly salary"
+    },
+    "errors": {
+      "invalid_phone": "Enter a valid phone number with country code.",
+      "otp_request_failed": "Could not send verification code. Please try again."
+    }
+  },
+  "home": {
+    "balance_title": "Available balance",
+    "transfer": "Transfer",
+    "add_money": "Add money",
+    "card": "Card",
+    "savings": "Savings",
+    "recent_transactions": "Recent activity"
+  },
+  "wallet": {
+    "balance": "Balance",
+    "send": "Send money",
+    "amount": "Amount",
+    "recipient_phone": "Recipient phone",
+    "fee_notice_basic": "AED 2 fee on Basic plan",
+    "fee_notice_luxury": "Free transfers on Luxury plan",
+    "send_now": "Send now",
+    "transactions_empty": "No transactions yet"
+  },
+  "cards": {
+    "balance": "Balance",
+    "cardholder": "Cardholder",
+    "expires": "Expires",
+    "blocked_message": "Card temporarily blocked",
+    "status": {
+      "blocked": "Blocked",
+      "active": "Active"
+    },
+    "no_card": "No virtual card yet",
+    "order_physical": "Order physical card"
+  },
+  "transactions": {
+    "DEPOSIT": "Deposit",
+    "WITHDRAWAL": "Withdrawal",
+    "TRANSFER": "Sent",
+    "RECEIVE": "Received",
+    "CASHBACK": "Cashback",
+    "FEE": "Fee",
+    "REFERRAL_REWARD": "Referral reward",
+    "SAVINGS_TRANSFER": "Savings",
+    "CARD_PURCHASE": "Card purchase",
+    "PAYROLL": "Salary",
+    "REMITTANCE": "Remittance",
+    "REFUND": "Refund"
+  }
+}

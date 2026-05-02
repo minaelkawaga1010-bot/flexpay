@@ -1,0 +1,82 @@
+{
+  "common": {
+    "continue": "متابعة",
+    "cancel": "إلغاء",
+    "ok": "حسناً",
+    "error": "خطأ",
+    "loading": "جارٍ التحميل…",
+    "retry": "إعادة المحاولة",
+    "save": "حفظ"
+  },
+  "auth": {
+    "phone": {
+      "title": "أدخل رقم هاتفك",
+      "subtitle": "سنرسل رمزاً مكوناً من 6 أرقام للتحقق من هويتك.",
+      "terms": "بالمتابعة، فإنك توافق على شروط الخدمة وسياسة الخصوصية."
+    },
+    "otp": {
+      "title": "تحقق من رقمك",
+      "subtitle": "أدخل الرمز المكوّن من 6 أرقام المرسل إلى {{phone}}.",
+      "verify": "تحقق",
+      "resend": "إعادة إرسال الرمز",
+      "resend_wait": "إعادة الإرسال خلال {{seconds}} ث",
+      "invalid_title": "رمز غير صحيح",
+      "invalid_message": "يرجى التحقق من الرمز والمحاولة مرة أخرى.",
+      "resend_failed": "تعذر إعادة إرسال الرمز، حاول لاحقاً."
+    },
+    "profile": {
+      "title": "حدثنا عن نفسك",
+      "subtitle": "سنستخدم هذه المعلومات لإعداد محفظتك.",
+      "full_name": "الاسم الكامل",
+      "salary": "الراتب الشهري"
+    },
+    "errors": {
+      "invalid_phone": "أدخل رقم هاتف صحيحاً مع رمز الدولة.",
+      "otp_request_failed": "تعذر إرسال رمز التحقق. حاول مرة أخرى."
+    }
+  },
+  "home": {
+    "balance_title": "الرصيد المتاح",
+    "transfer": "تحويل",
+    "add_money": "إضافة رصيد",
+    "card": "البطاقة",
+    "savings": "الادخار",
+    "recent_transactions": "النشاط الأخير"
+  },
+  "wallet": {
+    "balance": "الرصيد",
+    "send": "إرسال أموال",
+    "amount": "المبلغ",
+    "recipient_phone": "هاتف المستلم",
+    "fee_notice_basic": "رسوم 2 درهم على خطة الأساسية",
+    "fee_notice_luxury": "تحويلات مجانية في خطة لاكشري",
+    "send_now": "إرسال الآن",
+    "transactions_empty": "لا توجد معاملات بعد"
+  },
+  "cards": {
+    "balance": "الرصيد",
+    "cardholder": "حامل البطاقة",
+    "expires": "تنتهي",
+    "blocked_message": "البطاقة محظورة مؤقتاً",
+    "status": {
+      "blocked": "محظورة",
+      "active": "نشطة"
+    },
+    "no_card": "لا توجد بطاقة افتراضية بعد",
+    "order_physical": "اطلب بطاقة فعلية"
+  },
+  "transactions": {
+    "DEPOSIT": "إيداع",
+    "WITHDRAWAL": "سحب",
+    "TRANSFER": "إرسال",
+    "RECEIVE": "استلام",
+    "CASHBACK": "كاش باك",
+    "FEE": "رسوم",
+    "REFERRAL_REWARD": "مكافأة إحالة",
+    "SAVINGS_TRANSFER": "ادخار",
+    "CARD_PURCHASE": "شراء بالبطاقة",
+    "PAYROLL": "راتب",
+    "REMITTANCE": "تحويل دولي",
+    "REFUND": "استرداد"
+  }
+}

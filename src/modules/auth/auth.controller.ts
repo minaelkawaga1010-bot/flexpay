@@ -75,22 +75,37 @@ export class AuthController {
     res.status(200).json(result);
   };
 
+  // Web clients consume `refreshToken` from the HttpOnly cookie. Mobile/CLI
+  // clients can't read cookies, so we also include it in the JSON body —
+  // they never persist it back to the wire as a cookie themselves.
   private verifyOTP = async (req: Request, res: Response): Promise<void> => {
     const result = await authService.verifyEmployeeOTP(req.body);
     res.cookie('refreshToken', result.refreshToken, REFRESH_COOKIE_OPTIONS);
-    res.status(200).json({ accessToken: result.accessToken, user: result.user });
+    res.status(200).json({
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      user: result.user,
+    });
   };
 
   private registerCompany = async (req: Request, res: Response): Promise<void> => {
     const result = await authService.registerCompany(req.body, req.ip);
     res.cookie('refreshToken', result.refreshToken, REFRESH_COOKIE_OPTIONS);
-    res.status(201).json({ accessToken: result.accessToken, company: result.company });
+    res.status(201).json({
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      company: result.company,
+    });
   };
 
   private loginCompany = async (req: Request, res: Response): Promise<void> => {
     const result = await authService.loginCompany(req.body.email, req.body.password, req.ip);
     res.cookie('refreshToken', result.refreshToken, REFRESH_COOKIE_OPTIONS);
-    res.status(200).json({ accessToken: result.accessToken, company: result.company });
+    res.status(200).json({
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      company: result.company,
+    });
   };
 
   private refresh = async (req: Request, res: Response): Promise<void> => {
@@ -103,7 +118,10 @@ export class AuthController {
     }
     const tokens = await authService.refreshTokens(token);
     res.cookie('refreshToken', tokens.refreshToken, REFRESH_COOKIE_OPTIONS);
-    res.status(200).json({ accessToken: tokens.accessToken });
+    res.status(200).json({
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+    });
   };
 
   private logout = async (req: Request, res: Response): Promise<void> => {
