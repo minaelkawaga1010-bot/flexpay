@@ -6,11 +6,12 @@ interface Props {
   onChange: (next: string) => void;
   label?: string;
   error?: string | null;
+  testID?: string;
 }
 
 const sanitise = (raw: string) => raw.replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1');
 
-export const AmountInput: React.FC<Props> = ({ value, onChange, label, error }) => {
+export const AmountInput: React.FC<Props> = ({ value, onChange, label, error, testID }) => {
   return (
     <Input
       label={label}
@@ -20,6 +21,7 @@ export const AmountInput: React.FC<Props> = ({ value, onChange, label, error }) 
       keyboardType="decimal-pad"
       prefix="AED"
       error={error}
+      testID={testID}
     />
   );
 };

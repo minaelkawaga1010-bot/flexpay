@@ -21,6 +21,8 @@ interface ButtonProps {
   disabled?: boolean;
   icon?: React.ReactNode;
   style?: ViewStyle;
+  testID?: string;
+  accessibilityLabel?: string;
 }
 
 export const Button: React.FC<ButtonProps> = ({
@@ -32,6 +34,8 @@ export const Button: React.FC<ButtonProps> = ({
   disabled = false,
   icon,
   style,
+  testID,
+  accessibilityLabel,
 }) => {
   const isDisabled = disabled || loading;
   const styles = useStyles(variant, size, isDisabled);
@@ -39,9 +43,11 @@ export const Button: React.FC<ButtonProps> = ({
   return (
     <Pressable
       accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel ?? title}
       accessibilityState={{ disabled: isDisabled, busy: loading }}
       onPress={onPress}
       disabled={isDisabled}
+      testID={testID}
       style={({ pressed }) => [
         styles.container,
         pressed && !isDisabled && styles.pressed,

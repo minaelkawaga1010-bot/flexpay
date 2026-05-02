@@ -1,10 +1,13 @@
 /** @type {import('jest').Config} */
 module.exports = {
   preset: 'react-native',
-  setupFiles: ['./__tests__/setup.ts'],
+  // Native module mocks + jest-native matcher registration.
+  setupFiles: ['<rootDir>/__tests__/setup.ts'],
+  roots: ['<rootDir>/__tests__/unit'],
+  testMatch: ['**/__tests__/unit/**/*.test.(ts|tsx)'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
   transformIgnorePatterns: [
-    'node_modules/(?!(react-native|@react-native|@react-navigation|react-native-.*|@notifee|@sentry)/)',
+    'node_modules/(?!(react-native|@react-native|@react-navigation|react-native-.*|@notifee|@sentry|@testing-library)/)',
   ],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',

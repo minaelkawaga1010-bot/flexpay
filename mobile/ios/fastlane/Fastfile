@@ -1,0 +1,60 @@
+# Fastlane runs from the iOS directory. Drive end-to-end with:
+#   bundle exec fastlane ios beta
+#
+# Required env (set via CI secrets, never committed):
+#   FASTLANE_USER, FASTLANE_PASSWORD or APP_STORE_CONNECT_API_KEY_*
+#   MATCH_PASSWORD                 — fastlane match decryption
+#   SLACK_URL                      — incoming webhook for notifications
+#   RELEASE_NOTES                  — optional changelog override
+
+default_platform(:ios)
+
+platform :ios do
+  before_all do
+    setup_ci if ENV['CI']
+  end
+
+  desc 'Build and upload to TestFlight'
+  lane :beta do
+    cocoapods(repo_update: true, clean: true)
+
+    build_app(
+      workspace: 'FlexPay.xcworkspace',
+      scheme: 'FlexPay',
+      export_method: 'app-store',
+      export_options: {
+        compileBitcode: false,
+        manageAppVersionAndBuildNumber: true
+      }
+    )
+
+    upload_to_testflight(
+      skip_waiting_for_build_processing: true,
+      changelog: ENV['RELEASE_NOTES'] || 'FlexPay Beta Build'
+    )
+
+    if ENV['SLACK_URL']
+      slack(
+        message: ":rocket: iOS Beta uploaded to TestFlight",
+        payload: {
+          'Build Number' => get_build_number,
+          'Version'      => get_version_number
+        }
+      )
+    end
+  end
+
+  desc 'Increment marketing version (date-based) and build number (epoch)'
+  lane :increment do
+    increment_version_number(version_number: "1.0.#{Time.now.strftime('%Y%m%d')}")
+    increment_build_number(build_number: Time.now.to_i.to_s)
+  end
+
+  error do |lane, exception|
+    next unless ENV['SLACK_URL']
+    slack(
+      message: ":x: iOS lane `#{lane}` failed: #{exception.message}",
+      success: false
+    )
+  end
+end

@@ -4,7 +4,11 @@ export type AuthStackParamList = {
   Welcome: undefined;
   PhoneInput: undefined;
   OTP: { phone: string };
-  ProfileSetup: { phone: string };
+  // OTP is carried forward in memory so the second verify call (which
+  // sets `fullName`) can re-use it. The backend re-stores the OTP in
+  // Redis when it raises FULL_NAME_REQUIRED, so the second call will
+  // still find a valid OTP.
+  ProfileSetup: { phone: string; otp: string };
 };
 
 export type AppTabParamList = {

@@ -12,7 +12,7 @@ import {
 } from '@shared/utils/jwt';
 import { generateOTP } from '@shared/utils/otp';
 import { generateReferralCode } from '@shared/utils/referralCode';
-import { Conflict, Unauthorized, Forbidden } from '@shared/utils/errors';
+import { AppError, Conflict, Unauthorized, Forbidden } from '@shared/utils/errors';
 import logger from '@shared/utils/logger';
 import { twilioService } from './twilio.service';
 import { nymcardService } from '@modules/cards/nymcard.service';
@@ -33,7 +33,7 @@ export class AuthService {
   async verifyEmployeeOTP(input: {
     phone: string;
     otp: string;
-    fullName: string;
+    fullName?: string;
     salary?: number;
     companyId?: string;
     referralCode?: string;
@@ -54,7 +54,20 @@ export class AuthService {
         include: { cards: { where: { type: 'VIRTUAL' }, take: 1 } },
       });
     } else {
-      employee = await this.createEmployee(input);
+      // The OTP was correct, but no account exists yet — surface a
+      // structured 422 so the mobile client can navigate forward to its
+      // ProfileSetupScreen and re-call verify with `fullName` filled in.
+      // verifyOTP() above already deleted the OTP from Redis, so we
+      // re-store it (resetting the 5-minute TTL) before signalling.
+      if (!input.fullName) {
+        await redisService.storeOTP(input.phone, input.otp);
+        throw new AppError(
+          422,
+          'FULL_NAME_REQUIRED',
+          'Profile setup needed: fullName is required to create the account.',
+        );
+      }
+      employee = await this.createEmployee({ ...input, fullName: input.fullName });
     }
 
     const payload: JWTPayload = {

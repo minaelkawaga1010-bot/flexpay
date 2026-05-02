@@ -17,7 +17,10 @@ export const requestOtpSchema = z.object({
 export const verifyOtpSchema = z.object({
   phone: phoneSchema,
   otp: z.string().length(6, 'OTP must be 6 digits').regex(/^\d{6}$/),
-  fullName: z.string().min(2).max(100),
+  // Required only when the phone has no employee yet — the service layer
+  // enforces that distinction so the mobile app can split OTP entry and
+  // profile setup into separate screens.
+  fullName: z.string().min(2).max(100).optional(),
   salary: amountSchema.optional(),
   companyId: z.string().uuid().optional(),
   // Referrer's referral code is a cuid by default. Allow either format

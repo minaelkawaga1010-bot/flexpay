@@ -53,7 +53,7 @@ export const PhoneInputScreen: React.FC = () => {
   };
 
   return (
-    <SafeAreaView style={styles.root}>
+    <SafeAreaView style={styles.root} testID="phone-input-screen">
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.flex}
@@ -76,6 +76,7 @@ export const PhoneInputScreen: React.FC = () => {
               onChange={setPhone}
               error={error}
               editable={!isLoading}
+              testID="phone-input"
             />
 
             <View style={styles.cta}>
@@ -85,6 +86,7 @@ export const PhoneInputScreen: React.FC = () => {
                 loading={isLoading}
                 disabled={isLoading || phone.length < 12}
                 size="large"
+                testID="continue-button"
               />
             </View>
 

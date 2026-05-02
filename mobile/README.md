@@ -110,13 +110,18 @@ the host). See `src/config/api.ts` to override.
 ```
 WelcomeScreen
   └─ PhoneInputScreen
-       └─ POST /auth/employee/request-otp        ┐
-            (rate-limited 3/h per phone, OTP TTL 5 min in Redis)
-       └─ OTPScreen
-            ├─ POST /auth/employee/verify-otp    ┘
-            ├─ tokenManager.storeTokens          # Keychain (biometric on iOS)
-            ├─ useAuth.login → setUser           # Zustand persist
-            └─ enableBiometrics() (best-effort)
+       └─ POST /auth/employee/request-otp        # rate-limited 3/h per phone
+       └─ OTPScreen (per-cell OTPInput, auto-advance + Backspace nav)
+            └─ POST /auth/employee/verify-otp    # phone + otp only
+                 ├─ existing user → login        ──┐
+                 └─ 422 FULL_NAME_REQUIRED       ──┤  backend re-stores OTP
+                      └─ ProfileSetupScreen        │  for the next call
+                            └─ POST verify-otp     │  (phone + otp + fullName)
+                                 └─ creates ──────┤
+                                                  ▼
+                                          tokenManager.storeTokens
+                                          useAuth.login → setUser
+                                          RootNavigator swaps Auth → App
             ⇒ RootNavigator swaps Auth → App stack
 ```
 
@@ -148,6 +153,41 @@ so the App root can clean up on unmount or logout.
 ## Tests
 
 ```bash
-npm test          # Jest unit tests (Keychain + Firebase mocked in setup.ts)
-npm run test:e2e  # Detox iOS sim
+npm test                  # Jest unit tests under __tests__/unit/
+npm run test:e2e:build    # Detox build: `detox build -c ios.sim.debug`
+npm run test:e2e          # Detox runner against the simulator
 ```
+
+Unit tests use `@testing-library/react-native` with `@testing-library/jest-native`
+matchers (`toBeFocused`, etc). Native modules are mocked in
+`__tests__/setup.ts`.
+
+The Detox suite at `e2e/auth.e2e.test.ts` walks the full
+PhoneInput → OTP → ProfileSetup → Home flow against a real build; the
+config lives in `detox.config.js` (iOS simulator + Android emulator
+profiles). The OTP suite expects a backend that accepts a fixed test
+OTP for the test phone — typically a dev/staging build with an OTP
+override flag, or a Twilio Magic Number.
+
+## Distribution
+
+EAS profiles (see `eas.json`):
+
+```bash
+eas build --profile development   # internal sim/dev-client
+eas build --profile preview       # staging, internal distribution
+eas build --profile production    # store-bound build, autoIncrement
+eas submit --profile production
+```
+
+For more advanced iOS workflows (TestFlight upload + Slack notification +
+date-based versioning), the `ios/fastlane/Fastfile` exposes:
+
+```bash
+bundle exec fastlane ios beta       # build + upload to TestFlight
+bundle exec fastlane ios increment  # bump marketing + build numbers
+```
+
+`bundle exec fastlane ios beta` reads `RELEASE_NOTES`, `MATCH_PASSWORD`,
+and `SLACK_URL` from the environment — set them in CI secrets, never
+commit them.

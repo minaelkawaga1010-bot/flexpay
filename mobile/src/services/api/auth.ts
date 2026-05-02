@@ -25,7 +25,7 @@ export const authService = {
   async verifyOTP(payload: {
     phone: string;
     otp: string;
-    fullName: string;
+    fullName?: string;
     salary?: number;
     referralCode?: string;
   }): Promise<VerifyOtpResponse> {

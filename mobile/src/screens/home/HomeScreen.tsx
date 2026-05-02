@@ -33,7 +33,7 @@ export const HomeScreen: React.FC = () => {
   const recent = transactions.slice(0, 5);
 
   return (
-    <SafeAreaView style={styles.root}>
+    <SafeAreaView style={styles.root} testID="home-screen">
       <ScrollView
         contentContainerStyle={styles.scroll}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
@@ -44,11 +44,11 @@ export const HomeScreen: React.FC = () => {
           </Text>
         </View>
 
-        <Card elevation="md" style={styles.balance}>
+        <Card elevation="md" style={styles.balance} testID="balance-card">
           <Text variant="caption" color="inverse" style={styles.balanceLabel}>
             {t('home.balance_title')}
           </Text>
-          <Text variant="h1" color="inverse">
+          <Text variant="h1" color="inverse" testID="balance-amount">
             {formatAED(balance)}
           </Text>
         </Card>

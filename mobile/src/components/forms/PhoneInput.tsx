@@ -7,6 +7,7 @@ interface Props {
   placeholder?: string;
   error?: string | null;
   editable?: boolean;
+  testID?: string;
 }
 
 const sanitise = (raw: string) => {
@@ -16,7 +17,14 @@ const sanitise = (raw: string) => {
   return cleaned;
 };
 
-export const PhoneInput: React.FC<Props> = ({ value, onChange, placeholder, error, editable }) => {
+export const PhoneInput: React.FC<Props> = ({
+  value,
+  onChange,
+  placeholder,
+  error,
+  editable,
+  testID,
+}) => {
   return (
     <Input
       value={value}
@@ -28,6 +36,7 @@ export const PhoneInput: React.FC<Props> = ({ value, onChange, placeholder, erro
       editable={editable}
       error={error}
       maxLength={16}
+      testID={testID}
     />
   );
 };

@@ -16,6 +16,10 @@ interface InputProps extends TextInputProps {
   containerStyle?: ViewStyle;
 }
 
+// `testID` already flows through `...rest` to the inner TextInput; the
+// component re-declares it here so tests can target the field directly
+// via `getByTestId(...)` and Detox can resolve it by id.
+
 export const Input: React.FC<InputProps> = ({
   label,
   error,

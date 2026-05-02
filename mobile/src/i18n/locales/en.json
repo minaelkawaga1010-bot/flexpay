@@ -20,8 +20,9 @@
       "verify": "Verify",
       "resend": "Resend code",
       "resend_wait": "Resend in {{seconds}}s",
-      "invalid_title": "Invalid code",
+      "invalid_title": "Invalid or expired OTP",
       "invalid_message": "Please double-check the code and try again.",
+      "expired_message": "Your verification window expired. Please request a new code.",
       "resend_failed": "Could not resend code, please try again later."
     },
     "profile": {

@@ -1,11 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, StyleSheet, TextInput, View } from 'react-native';
+import { Alert, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useTranslation } from 'react-i18next';
-import { Button, Input, LoadingSpinner, Text } from '@components/ui';
-import { OTPInput } from '@components/forms';
+import { Button, LoadingSpinner, Text } from '@components/ui';
+import { OTPInput, OTPInputHandle } from '@components/forms/OTPInput';
 import { authService } from '@services/api/auth';
 import { useAuth } from '@services/auth/useAuth';
 import { handleApiError } from '@services/api/client';
@@ -25,13 +25,10 @@ export const OTPScreen: React.FC = () => {
   const { t } = useTranslation();
   const { login } = useAuth();
   const { enableBiometrics } = useBiometrics();
-  const inputRef = useRef<TextInput>(null);
+  const otpRef = useRef<OTPInputHandle>(null);
 
   const { phone } = route.params;
   const [otp, setOtp] = useState('');
-  const [fullName, setFullName] = useState('');
-  const [salary, setSalary] = useState('');
-  const [step, setStep] = useState<'verify' | 'profile'>('verify');
   const [isLoading, setIsLoading] = useState(false);
   const [resendTimer, setResendTimer] = useState(0);
 
@@ -41,46 +38,35 @@ export const OTPScreen: React.FC = () => {
     return () => clearTimeout(id);
   }, [resendTimer]);
 
-  const handleVerify = async () => {
-    if (otp.length !== 6) {
-      haptics.notification('warning');
-      return;
-    }
-    if (step === 'profile' && (!fullName.trim() || !salary)) return;
-
+  const verify = async (code: string) => {
     setIsLoading(true);
     haptics.selection();
-
     try {
-      const response = await authService.verifyOTP({
-        phone,
-        otp,
-        fullName: step === 'profile' ? fullName.trim() : 'New User',
-        salary: step === 'profile' && salary ? parseFloat(salary) : undefined,
-      });
-
+      const response = await authService.verifyOTP({ phone, otp: code });
       await login(response.accessToken, response.refreshToken, response.user);
-      // Best-effort biometric setup; user can decline.
       void enableBiometrics();
-
       Analytics.logEvent(EVENTS.AUTH_SUCCESS, {
         is_new_user: response.user.status === 'PENDING_KYC',
         plan: response.user.plan,
       });
-      // RootNavigator will swap stacks once `isAuthenticated` flips.
+      // RootNavigator swaps stacks once isAuthenticated flips.
     } catch (err) {
       const apiError = handleApiError(err);
 
-      // The backend creates the employee on the first verify, so a
-      // missing-name response only happens if validation rejects us. The
-      // user-facing case here is just "invalid OTP".
-      if (apiError.error === 'UNAUTHORIZED' || apiError.error === 'INVALID_OR_EXPIRED_OTP') {
+      if (apiError.error === 'FULL_NAME_REQUIRED') {
+        // First-time user — collect their profile and re-verify there.
+        navigation.navigate('ProfileSetup', { phone, otp: code });
+        return;
+      }
+
+      if (
+        apiError.error === 'UNAUTHORIZED' ||
+        apiError.error === 'INVALID_OR_EXPIRED_OTP' ||
+        apiError.statusCode === 401
+      ) {
         Alert.alert(t('auth.otp.invalid_title'), t('auth.otp.invalid_message'));
         setOtp('');
-        inputRef.current?.focus();
-      } else if (apiError.error === 'BAD_REQUEST' && step === 'verify') {
-        // Backend's verifyOtpSchema requires fullName — escalate to profile step.
-        setStep('profile');
+        otpRef.current?.focus();
       } else {
         Alert.alert(t('common.error'), apiError.message ?? 'Something went wrong');
       }
@@ -103,83 +89,54 @@ export const OTPScreen: React.FC = () => {
   };
 
   return (
-    <SafeAreaView style={styles.root}>
+    <SafeAreaView style={styles.root} testID="otp-screen">
       <View style={styles.content}>
         <Button
           title="←"
           variant="ghost"
           onPress={() => navigation.goBack()}
           style={styles.back}
+          testID="otp-back-button"
         />
 
         <Text variant="h2" style={styles.title}>
-          {step === 'verify' ? t('auth.otp.title') : t('auth.profile.title')}
+          {t('auth.otp.title')}
         </Text>
         <Text variant="body" color="secondary" style={styles.subtitle}>
-          {step === 'verify' ? t('auth.otp.subtitle', { phone }) : t('auth.profile.subtitle')}
+          {t('auth.otp.subtitle', { phone })}
         </Text>
 
-        {step === 'verify' ? (
-          <>
-            <OTPInput
-              value={otp}
-              onChange={setOtp}
-              length={6}
-              inputRef={inputRef}
-              onComplete={handleVerify}
-              disabled={isLoading}
-            />
-            <View style={styles.actions}>
-              <Button
-                title={t('auth.otp.verify')}
-                onPress={handleVerify}
-                loading={isLoading}
-                disabled={otp.length !== 6 || isLoading}
-                size="large"
-              />
-              <Button
-                variant="link"
-                title={
-                  resendTimer > 0
-                    ? t('auth.otp.resend_wait', { seconds: resendTimer })
-                    : t('auth.otp.resend')
-                }
-                onPress={handleResend}
-                disabled={resendTimer > 0 || isLoading}
-                style={styles.resend}
-              />
-            </View>
-          </>
-        ) : (
-          <>
-            <Input
-              label={t('auth.profile.full_name')}
-              value={fullName}
-              onChangeText={setFullName}
-              placeholder="Ahmed Mohamed"
-              autoCapitalize="words"
-              editable={!isLoading}
-            />
-            <Input
-              label={t('auth.profile.salary')}
-              value={salary}
-              onChangeText={setSalary}
-              placeholder="3500"
-              keyboardType="numeric"
-              prefix="AED"
-              editable={!isLoading}
-              containerStyle={styles.salary}
-            />
-            <Button
-              title={t('common.continue')}
-              onPress={handleVerify}
-              loading={isLoading}
-              disabled={!fullName || !salary || isLoading}
-              size="large"
-              style={styles.cta}
-            />
-          </>
-        )}
+        <OTPInput
+          ref={otpRef}
+          value={otp}
+          onChange={setOtp}
+          length={6}
+          onComplete={verify}
+          disabled={isLoading}
+        />
+
+        <View style={styles.actions}>
+          <Button
+            title={t('auth.otp.verify')}
+            onPress={() => verify(otp)}
+            loading={isLoading}
+            disabled={otp.length !== 6 || isLoading}
+            size="large"
+            testID="verify-otp-button"
+          />
+          <Button
+            variant="link"
+            title={
+              resendTimer > 0
+                ? t('auth.otp.resend_wait', { seconds: resendTimer })
+                : t('auth.otp.resend')
+            }
+            onPress={handleResend}
+            disabled={resendTimer > 0 || isLoading}
+            style={styles.resend}
+            testID="resend-otp-button"
+          />
+        </View>
       </View>
 
       {isLoading ? <LoadingSpinner overlay /> : null}
@@ -195,6 +152,4 @@ const styles = StyleSheet.create({
   subtitle: { marginBottom: spacing['2xl'] },
   actions: { marginTop: spacing['2xl'], alignItems: 'center' },
   resend: { marginTop: spacing.base },
-  salary: { marginTop: spacing.base },
-  cta: { marginTop: spacing['2xl'] },
 });
