@@ -1,6 +1,16 @@
 import { prisma } from '@config/prisma';
 import { NotFound } from '@shared/utils/errors';
 
+export interface CreateOfferInput {
+  title: string;
+  description?: string;
+  discountPercentage: number;
+  merchant: string;
+  affiliateLink: string;
+  imageUrl?: string;
+  expiresAt: Date;
+}
+
 export const offersService = {
   async listActive() {
     return prisma.offer.findMany({
@@ -19,22 +29,11 @@ export const offersService = {
     return offer.affiliateLink;
   },
 
-  async create(input: {
-    title: string;
-    description?: string;
-    discountPercentage: number;
-    merchant: string;
-    affiliateLink: string;
-    imageUrl?: string;
-    expiresAt: Date;
-  }) {
+  async create(input: CreateOfferInput) {
     return prisma.offer.create({ data: input });
   },
 
-  async update(
-    id: string,
-    patch: Partial<Parameters<typeof offersService.create>[0]> & { isActive?: boolean },
-  ) {
+  async update(id: string, patch: Partial<CreateOfferInput> & { isActive?: boolean }) {
     return prisma.offer.update({ where: { id }, data: patch });
   },
 

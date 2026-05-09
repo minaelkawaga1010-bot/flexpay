@@ -19,7 +19,7 @@ import { haptics } from '@services/utils/haptics';
 import { useBiometrics } from '@hooks/useBiometrics';
 import * as Analytics from '@services/analytics/analytics';
 import { EVENTS } from '@services/analytics/events';
-import { AuthStackParamList } from '@types/navigation';
+import { AuthStackParamList } from '@/types/navigation';
 import { colors, spacing } from '@theme';
 
 type Nav = NativeStackNavigationProp<AuthStackParamList, 'ProfileSetup'>;

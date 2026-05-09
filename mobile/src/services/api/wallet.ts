@@ -1,6 +1,6 @@
 import apiClient from './client';
-import { Transaction, TransactionType } from '@types/transaction';
-import { Pagination } from '@types/api';
+import { Transaction, TransactionType } from '@/types/transaction';
+import { Pagination } from '@/types/api';
 
 export interface TransferResult {
   success: boolean;

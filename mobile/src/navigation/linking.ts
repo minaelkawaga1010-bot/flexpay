@@ -1,5 +1,5 @@
 import { LinkingOptions } from '@react-navigation/native';
-import { RootStackParamList } from '@types/navigation';
+import { RootStackParamList } from '@/types/navigation';
 
 export const linking: LinkingOptions<RootStackParamList> = {
   prefixes: ['flexpay://', 'https://flexpay.ae'],

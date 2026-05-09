@@ -13,7 +13,7 @@ import { haptics } from '@services/utils/haptics';
 import { useKeyboard } from '@hooks/useKeyboard';
 import * as Analytics from '@services/analytics/analytics';
 import { EVENTS } from '@services/analytics/events';
-import { AuthStackParamList } from '@types/navigation';
+import { AuthStackParamList } from '@/types/navigation';
 import { colors, spacing } from '@theme';
 
 type Nav = NativeStackNavigationProp<AuthStackParamList, 'PhoneInput'>;

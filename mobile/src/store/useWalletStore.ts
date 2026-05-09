@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import { walletService } from '@services/api/wallet';
-import { Transaction } from '@types/transaction';
+import { Transaction } from '@/types/transaction';
 import logger from '@services/utils/logger';
 
 const PAGE_SIZE = 20;

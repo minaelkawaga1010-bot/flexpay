@@ -1,5 +1,5 @@
 import apiClient from './client';
-import { AuthUser } from '@types/user';
+import { AuthUser } from '@/types/user';
 
 export interface VerifyOtpResponse {
   accessToken: string;

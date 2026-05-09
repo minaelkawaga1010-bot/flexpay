@@ -5,7 +5,7 @@ import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useTranslation } from 'react-i18next';
 import { Button, Text } from '@components/ui';
-import { AuthStackParamList } from '@types/navigation';
+import { AuthStackParamList } from '@/types/navigation';
 import { colors, spacing } from '@theme';
 
 type Nav = NativeStackNavigationProp<AuthStackParamList, 'Welcome'>;

@@ -1,4 +1,58 @@
 {
   "name": "FlexPayMobile",
-  "displayName": "FlexPay"
+  "displayName": "FlexPay",
+  "expo": {
+    "name": "FlexPay",
+    "slug": "flexpay-mobile",
+    "version": "1.0.0",
+    "scheme": "flexpay",
+    "owner": "flexpay",
+    "ios": {
+      "bundleIdentifier": "ae.flexpay.mobile",
+      "associatedDomains": [
+        "applinks:flexpay.ae",
+        "applinks:dashboard.flexpay.ae"
+      ],
+      "supportsTablet": false,
+      "infoPlist": {
+        "CFBundleURLTypes": [
+          {
+            "CFBundleURLSchemes": ["flexpay"]
+          }
+        ],
+        "NSFaceIDUsageDescription": "FlexPay uses Face ID to keep your wallet locked when the device is unattended.",
+        "NSCameraUsageDescription": "FlexPay uses the camera to capture KYC documents.",
+        "NSPhotoLibraryUsageDescription": "FlexPay reads photos to upload KYC documents."
+      }
+    },
+    "android": {
+      "package": "ae.flexpay.mobile",
+      "versionCode": 1,
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "category": ["BROWSABLE", "DEFAULT"],
+          "autoVerify": true,
+          "data": [
+            { "scheme": "flexpay" },
+            { "scheme": "https", "host": "flexpay.ae" },
+            { "scheme": "https", "host": "dashboard.flexpay.ae" }
+          ]
+        }
+      ],
+      "permissions": [
+        "INTERNET",
+        "USE_BIOMETRIC",
+        "USE_FINGERPRINT",
+        "POST_NOTIFICATIONS",
+        "RECEIVE_SMS",
+        "READ_SMS"
+      ]
+    },
+    "plugins": [
+      "@react-native-firebase/app",
+      "@react-native-firebase/messaging",
+      ["expo-build-properties", { "ios": { "useFrameworks": "static" } }]
+    ]
+  }
 }

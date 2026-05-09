@@ -14,7 +14,6 @@ module.exports = {
           '@store': './src/store',
           '@hooks': './src/hooks',
           '@theme': './src/theme',
-          '@types': './src/types',
           '@config': './src/config',
           '@i18n': './src/i18n',
         },

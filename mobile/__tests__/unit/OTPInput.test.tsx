@@ -1,3 +1,4 @@
+/// <reference types="@testing-library/jest-native" />
 /**
  * Tests for the per-cell OTPInput.
  *

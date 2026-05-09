@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import { cardsService } from '@services/api/cards';
-import { Card } from '@types/card';
+import { Card } from '@/types/card';
 import logger from '@services/utils/logger';
 
 interface CardsState {

@@ -1,5 +1,5 @@
 import apiClient from './client';
-import { Card } from '@types/card';
+import { Card } from '@/types/card';
 
 export interface OrderPhysicalResponse {
   message: string;

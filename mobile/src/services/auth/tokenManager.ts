@@ -3,7 +3,7 @@ import { Platform } from 'react-native';
 import axios from 'axios';
 import { apiConfig } from '@config/api';
 import logger from '@services/utils/logger';
-import { AuthUser } from '@types/user';
+import { AuthUser } from '@/types/user';
 
 const SERVICES = {
   ACCESS: 'flexpay.accessToken',

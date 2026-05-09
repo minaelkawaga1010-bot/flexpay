@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
-import { AuthUser } from '@types/user';
+import { AuthUser } from '@/types/user';
 
 interface UserState {
   user: AuthUser | null;

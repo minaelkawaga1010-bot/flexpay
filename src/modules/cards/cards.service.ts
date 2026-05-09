@@ -22,11 +22,11 @@ export const cardsService = {
 
     let customerId = employee.nymcardCustomerId;
     if (!customerId) {
-      const customer = await nymcardService.createCustomer(
-        employee.fullName,
-        employee.email ?? `${employee.phone}@flexpay.ae`,
-        employee.phone,
-      );
+      const customer = await nymcardService.createCustomer({
+        name: employee.fullName,
+        email: employee.email ?? `${employee.phone}@flexpay.ae`,
+        phone: employee.phone,
+      });
       customerId = customer.id;
     }
 

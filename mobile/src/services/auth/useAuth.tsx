@@ -3,7 +3,7 @@ import { tokenManager } from './tokenManager';
 import { authEmitter } from './authEvents';
 import { authService } from '@services/api/auth';
 import { useUserStore } from '@store/useUserStore';
-import { AuthUser } from '@types/user';
+import { AuthUser } from '@/types/user';
 import logger from '@services/utils/logger';
 
 interface AuthContextValue {

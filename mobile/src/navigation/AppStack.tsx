@@ -1,7 +1,7 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { AppTabParamList, WalletStackParamList, CardsStackParamList } from '@types/navigation';
+import { AppTabParamList, WalletStackParamList, CardsStackParamList } from '@/types/navigation';
 import { HomeScreen } from '@screens/home/HomeScreen';
 import { WalletScreen } from '@screens/wallet/WalletScreen';
 import { TransferScreen } from '@screens/wallet/TransferScreen';
