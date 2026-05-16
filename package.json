@@ -16,7 +16,13 @@
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
     "docker:up": "docker-compose up -d",
-    "docker:down": "docker-compose down"
+    "docker:down": "docker-compose down",
+    "typecheck": "tsc --noEmit",
+    "typecheck:mobile": "cd mobile && npx tsc --noEmit",
+    "typecheck:dashboard": "cd dashboard && npx tsc --noEmit",
+    "typecheck:all": "npm run typecheck && npm run typecheck:mobile && npm run typecheck:dashboard",
+    "test:mobile": "cd mobile && npm test --silent",
+    "test:all": "npm test && npm run test:mobile"
   },
   "dependencies": {
     "@prisma/client": "^5.10.0",
