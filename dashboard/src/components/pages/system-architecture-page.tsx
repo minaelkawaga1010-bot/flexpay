@@ -33,6 +33,8 @@ import {
   AlertTriangle,
   ExternalLink,
   Radio,
+  Rocket,
+  Bell,
 } from "lucide-react";
 import {
   Card,
@@ -50,7 +52,7 @@ const fadeUp = {
   visible: (i: number) => ({
     opacity: 1,
     y: 0,
-    transition: { delay: i * 0.08, duration: 0.5, ease: "easeOut" },
+    transition: { delay: i * 0.08, duration: 0.5, ease: "easeOut" as const },
   }),
 };
 
@@ -735,7 +737,7 @@ function TechStackGrid() {
                 key={cat.category}
                 onClick={() => setExpanded(expanded === cat.category ? null : cat.category)}
                 whileHover={{ y: -2 }}
-                className={`text-left rounded-xl border ${cat.borderColor} ${cat.bg} p-4 transition-all hover:shadow-md ${
+                className={`text-left rounded-xl border ${cat.borderColor} ${cat.bgColor} p-4 transition-all hover:shadow-md ${
                   expanded === cat.category ? "ring-2 ring-offset-1 ring-emerald-500/50" : ""
                 }`}
               >
@@ -745,7 +747,7 @@ function TechStackGrid() {
                     <h4 className={`text-sm font-bold ${cat.color}`}>{cat.category}</h4>
                   </div>
                   <div className="flex items-center gap-1.5">
-                    <Badge className={`border-0 text-[10px] font-medium ${cat.bg} ${cat.color}`}>
+                    <Badge className={`border-0 text-[10px] font-medium ${cat.bgColor} ${cat.color}`}>
                       {cat.items.length}
                     </Badge>
                     {expanded === cat.category ? (
@@ -975,6 +977,7 @@ function ConnectionTable() {
                 {connections.map((c) => {
                   const src = services.find((s) => s.id === c.from);
                   const tgt = services.find((s) => s.id === c.to);
+                  if (!src || !tgt) return null;
                   return (
                     <tr key={`${c.from}-${c.to}`} className="border-b border-border/50 last:border-0 hover:bg-muted/30 transition-colors">
                       <td className="px-6 py-3">

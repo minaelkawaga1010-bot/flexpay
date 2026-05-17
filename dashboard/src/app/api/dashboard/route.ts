@@ -62,7 +62,7 @@ export async function GET() {
     });
 
     // Monthly transaction volume for last 6 months (for chart)
-    const monthlyVolume = [];
+    const monthlyVolume: Array<{ month: string; volume: number; count: number }> = [];
     for (let i = 5; i >= 0; i--) {
       const mStart = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const mEnd = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);

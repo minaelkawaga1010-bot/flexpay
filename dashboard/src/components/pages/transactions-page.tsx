@@ -763,7 +763,7 @@ export function TransactionsPage() {
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, ease: "easeOut" }}
+        transition={{ duration: 0.4, ease: "easeOut" as const }}
         className="grid grid-cols-2 gap-3 sm:grid-cols-4"
       >
         <StatCard
@@ -796,7 +796,7 @@ export function TransactionsPage() {
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.1, ease: "easeOut" }}
+        transition={{ duration: 0.4, delay: 0.1, ease: "easeOut" as const }}
       >
         <Card>
           <CardContent className="p-4">
@@ -889,7 +889,7 @@ export function TransactionsPage() {
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.2, ease: "easeOut" }}
+        transition={{ duration: 0.4, delay: 0.2, ease: "easeOut" as const }}
       >
         <Card>
           <div className="flex items-center justify-between border-b px-4 py-3">

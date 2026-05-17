@@ -204,10 +204,13 @@ class RetryWorker {
     batchId: string;
     netAmount: number;
     failureReason: string | null;
-    employee?: { employeeId: string; user?: { fullName?: string } } | null;
-    company?: { fullName?: string } | null;
+    // The caller includes `employee: true` on the Payroll query, which
+    // returns the User row (Payroll.employee is User). We fall back to
+    // the employeeUserId if the include is absent.
+    employee?: { id: string; fullName: string } | null;
+    company?: { id: string; fullName: string } | null;
   }): Promise<void> {
-    const employeeName = payroll.employee?.user?.fullName ?? payroll.employee?.employeeId ?? 'Unknown';
+    const employeeName = payroll.employee?.fullName ?? payroll.employeeUserId;
     const companyName = payroll.company?.fullName ?? 'Company';
 
     // Mark payroll as permanently failed with escalation note

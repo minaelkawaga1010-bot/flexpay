@@ -400,7 +400,7 @@ export function LoansPage() {
           outstandingBalance: l.outstandingBalance ?? 0,
           nextPaymentDate: l.nextPaymentDate ?? "",
           status: l.status === "DISBURSED" ? "REPAYING" : (l.status ?? "REPAYING"),
-          repaidAmount: ((l.amount ?? 0) - (l.outstandingBalance ?? 0)),
+          repaidAmount: (Number(l.amount ?? 0) - Number(l.outstandingBalance ?? 0)),
         })),
         repayments: mockData.repayments,
         creditScore: json.creditScore ?? 78,

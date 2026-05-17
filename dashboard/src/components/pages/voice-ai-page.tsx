@@ -567,13 +567,8 @@ export function VoiceAIPage() {
                             className="ml-0.5 rounded-full p-0.5 transition-colors hover:bg-black/5 dark:hover:bg-white/10"
                             aria-label="Replay audio"
                           >
-                            <Volume2
-                              className={`size-3 ${
-                                msg.role === "user"
-                                  ? "text-emerald-200/70"
-                                  : "text-muted-foreground/50"
-                              }`}
-                            />
+                            {/* msg.role is narrowed to "assistant" inside this block. */}
+                            <Volume2 className="size-3 text-muted-foreground/50" />
                           </button>
                         )}
                       </div>

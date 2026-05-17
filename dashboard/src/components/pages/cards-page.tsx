@@ -305,7 +305,7 @@ function CreditCardVisual({
     <motion.div
       initial={{ opacity: 0, rotateY: -15 }}
       animate={{ opacity: 1, rotateY: 0 }}
-      transition={{ duration: 0.5, ease: "easeOut" }}
+      transition={{ duration: 0.5, ease: "easeOut" as const }}
       className={`group relative w-full overflow-hidden rounded-2xl ${isActive ? "" : "scale-[0.88] opacity-75"} transition-transform`}
       style={{ aspectRatio: "1.586 / 1" }}
     >

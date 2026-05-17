@@ -463,7 +463,7 @@ export function RemittancePage() {
           </div>
           <motion.div
             animate={{ rotate: [0, 10, -10, 0] }}
-            transition={{ repeat: Infinity, duration: 6, ease: "easeInOut" }}
+            transition={{ repeat: Infinity, duration: 6, ease: "easeInOut" as const }}
             className="hidden sm:block"
           >
             <Globe className="size-20 text-emerald-300/60" />
@@ -818,7 +818,7 @@ export function RemittancePage() {
               <CardTitle className="text-base">Recent Remittances</CardTitle>
             </CardHeader>
             <CardContent>
-              {recentRemittances.length === 0 ? (
+              {mockRecentRemittances.length === 0 ? (
                 <div className="rounded-lg border border-dashed p-6 text-center">
                   <Send className="mx-auto size-8 text-muted-foreground/40" />
                   <p className="mt-2 text-sm text-muted-foreground">No remittances yet</p>
@@ -826,7 +826,7 @@ export function RemittancePage() {
                 </div>
               ) : (
                 <div className="space-y-3 max-h-80 overflow-y-auto">
-                  {recentRemittances.map((r) => (
+                  {mockRecentRemittances.map((r) => (
                     <div key={r.id} className="flex items-center justify-between rounded-lg border p-3 transition-colors hover:bg-muted/30">
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-semibold truncate">{r.recipient}</p>

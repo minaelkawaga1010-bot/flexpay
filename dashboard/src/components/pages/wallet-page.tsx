@@ -760,7 +760,7 @@ export function WalletPage() {
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, ease: "easeOut" }}
+        transition={{ duration: 0.4, ease: "easeOut" as const }}
       >
         {isLoading ? (
           <HeroSkeleton />
@@ -880,7 +880,7 @@ export function WalletPage() {
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.1, ease: "easeOut" }}
+        transition={{ duration: 0.4, delay: 0.1, ease: "easeOut" as const }}
       >
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
           Currency Pockets
@@ -957,7 +957,7 @@ export function WalletPage() {
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.2, ease: "easeOut" }}
+        transition={{ duration: 0.4, delay: 0.2, ease: "easeOut" as const }}
       >
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
           Quick Actions
@@ -981,7 +981,7 @@ export function WalletPage() {
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.3, ease: "easeOut" }}
+        transition={{ duration: 0.4, delay: 0.3, ease: "easeOut" as const }}
       >
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
           Recent Activity

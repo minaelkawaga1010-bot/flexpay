@@ -370,9 +370,8 @@ export async function processCompanyPayroll(
       },
     });
 
-    // Audit log for batch completion
+    // Audit log for batch completion. `result` already carries batchId.
     await createAuditLog(companyUserId, 'PAYROLL_BATCH_COMPLETE', 'Payroll', {
-      batchId,
       ...result,
     });
 
@@ -407,11 +406,13 @@ export async function processSingleEmployeePayroll(payrollId: string): Promise<v
   const payroll = await db.payroll.findUnique({
     where: { id: payrollId },
     include: {
+      // Payroll.employee is the employee's User. Pull their wallet and
+      // the Employee profile (via the back-reference array — 1:1 in
+      // practice thanks to uniq userId, but Prisma surfaces as array).
       employee: {
         include: {
-          user: {
-            include: { wallet: { include: { balances: true } } },
-          },
+          wallet: { include: { balances: true } },
+          employees: { take: 1 },
         },
       },
     },
@@ -429,9 +430,10 @@ export async function processSingleEmployeePayroll(payrollId: string): Promise<v
     throw new Error(`No employee profile linked to payroll ${payrollId}`);
   }
 
-  if (!payroll.employee.user.wallet) {
+  if (!payroll.employee.wallet) {
     throw new Error(`Employee has no wallet for payroll ${payrollId}`);
   }
+  const employeeProfile = payroll.employee.employees[0];
 
   // Reset status to PROCESSING
   await db.payroll.update({
@@ -442,7 +444,7 @@ export async function processSingleEmployeePayroll(payrollId: string): Promise<v
   try {
     // Atomic transaction for wallet credit
     await db.$transaction(async (tx) => {
-      const wallet = payroll.employee!.user.wallet!;
+      const wallet = payroll.employee!.wallet!;
 
       // Find or create AED balance
       const existingBalance = await tx.balance.findUnique({
@@ -484,7 +486,7 @@ export async function processSingleEmployeePayroll(payrollId: string): Promise<v
           metadata: JSON.stringify({
             batchId: payroll.batchId,
             payrollId: payroll.id,
-            employeeId: payroll.employee?.employeeId,
+            employeeId: employeeProfile?.employeeId,
             isRetry: true,
           }),
         },

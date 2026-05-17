@@ -55,12 +55,19 @@ export async function GET(request: NextRequest) {
       db.payroll.findMany({
         where,
         include: {
+          // Payroll.employee is the employee's User row. The Employee
+          // profile (position/department/companyEmployeeId) lives on the
+          // User-side back-reference `employees` (1:1 in practice — uniq
+          // userId — but Prisma surfaces it as an array).
           employee: {
             select: {
-              employeeId: true,
-              position: true,
-              department: true,
-              user: { select: { fullName: true, phone: true } },
+              id: true,
+              fullName: true,
+              phone: true,
+              employees: {
+                select: { employeeId: true, position: true, department: true },
+                take: 1,
+              },
             },
           },
           transaction: {

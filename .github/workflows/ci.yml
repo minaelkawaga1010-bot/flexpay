@@ -69,4 +69,5 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
       - name: Lint
-        run: npm run lint --silent || true
+        run: npm run lint --silent
+        continue-on-error: true

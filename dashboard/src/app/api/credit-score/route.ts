@@ -105,7 +105,7 @@ function getRecommendation(score: number): string {
 }
 
 function generateScoreHistory(currentScore: number): Array<{ month: string; score: number }> {
-  const months = [];
+  const months: Array<{ month: string; score: number }> = [];
   let score = Math.max(0, currentScore - 15 - Math.random() * 10);
   for (let i = 5; i >= 0; i--) {
     const d = new Date();
