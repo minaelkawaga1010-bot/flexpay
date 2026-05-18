@@ -139,6 +139,11 @@ model Employee {
   loans                 Loan[]
   offerClicks           OfferClick[]
 
+  // WPS Routing plane back-references
+  payrollIntents        PayrollIntent[]
+  advances              Advance[]
+  ledgerEntries         LedgerEntry[]
+
   // Inverse sides of the Referral relation
   referralsMade         Referral[]          @relation("ReferralsMade")
   referralReceived      Referral?           @relation("ReferralsReceived")
@@ -172,6 +177,7 @@ model Company {
 
   employees             Employee[]
   scheduledPayrolls     ScheduledPayroll[]
+  payrollCycles         PayrollCycle[]
 
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
@@ -443,4 +449,148 @@ model AuditLog {
   @@index([actorType, actorId, createdAt])
   @@index([action, createdAt])
   @@map("audit_logs")
+}
+
+// =====================================================================
+// WPS Routing Plane
+//
+// These tables back the moat described in docs/STRATEGY.md §3.2:
+//   1. PayrollCycle      — the company × period unit of work
+//   2. PayrollIntent     — per-employee derived row from the WPS file;
+//                          accruedAmount comes from HR-tech attendance
+//   3. Advance           — EWA request bound to a cycle
+//   4. LedgerEntry       — append-only, signed-delta ledger that's the
+//                          source of truth for the reconciliation worker
+//
+// Invariants enforced in code (src/modules/payroll-routing/):
+//   I1  advance.amount     <= intent.accruedAmount
+//   I2  advance.cycleId    == intent.cycleId
+//   I3  Σ LedgerEntry.delta per (employee, cycle) == 0 post-settle
+// =====================================================================
+
+enum PayrollCycleStatus {
+  OPEN            // Company created the cycle, no file yet
+  INGESTING       // WPS file received, parsing in progress
+  INTENTS_READY   // PayrollIntents materialised, awaiting settlement
+  SETTLED         // All intents routed
+  FAILED          // Drift detected or routing aborted
+}
+
+enum PayrollIntentStatus {
+  PENDING
+  ROUTED
+  FAILED
+}
+
+enum AdvanceStatus {
+  REQUESTED       // User asked for it
+  APPROVED        // DCSE green-lit it
+  RESERVED        // Wallet credited; ledger reserve entry written
+  SETTLED         // Deducted from PayrollIntent on cycle close
+  REJECTED        // DCSE / failsafe denied
+  FAILED          // Settlement attempted and broke an invariant
+}
+
+enum LedgerEntryType {
+  ADVANCE_RESERVE     // wallet+ when advance is approved & reserved
+  ADVANCE_SETTLE      // intent- when payroll cycle settles the advance
+  PAYROLL_RESIDUAL    // wallet+ residual (gross - settled advances)
+  PAYROLL_FULL        // wallet+ full salary (no advance to settle)
+  RECONCILIATION_ADJ  // ops-issued manual adjustment (audit-logged)
+}
+
+model PayrollCycle {
+  id              String              @id @default(uuid())
+  companyId       String
+  periodStart     DateTime
+  periodEnd       DateTime
+  fileFingerprint String?             @unique  // sha256 of source WPS file
+  fileFormat      String?             // UAE_MT940 | UAE_SIF | UAE_CSV | KSA_MUDAD
+  status          PayrollCycleStatus  @default(OPEN)
+  failureReason   String?
+  ingestedAt      DateTime?
+  settledAt       DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  company         Company             @relation(fields: [companyId], references: [id])
+  intents         PayrollIntent[]
+  advances        Advance[]
+  ledgerEntries   LedgerEntry[]
+
+  @@unique([companyId, periodStart, periodEnd])
+  @@index([status, settledAt])
+  @@map("payroll_cycles")
+}
+
+model PayrollIntent {
+  id              String               @id @default(uuid())
+  cycleId         String
+  employeeId      String
+  grossAmount     Float                // What the employer is paying this cycle
+  accruedAmount   Float                // What HR-tech attendance confirms is earned today
+  currency        String               @default("AED")
+  status          PayrollIntentStatus  @default(PENDING)
+  fileLineHash    String               // sha256(line) — traceability to source file row
+  routedAt        DateTime?
+  createdAt       DateTime             @default(now())
+
+  cycle           PayrollCycle         @relation(fields: [cycleId], references: [id])
+  employee        Employee             @relation(fields: [employeeId], references: [id])
+  ledgerEntries   LedgerEntry[]
+
+  @@unique([cycleId, employeeId])
+  @@index([status])
+  @@map("payroll_intents")
+}
+
+model Advance {
+  id              String         @id @default(uuid())
+  employeeId      String
+  cycleId         String
+  amount          Float          // Net to user
+  fee             Float          @default(0)  // Fixed processing fee (regulator-aligned, not interest)
+  currency        String         @default("AED")
+  status          AdvanceStatus  @default(REQUESTED)
+  failureReason   String?
+  requestedAt     DateTime       @default(now())
+  approvedAt      DateTime?
+  reservedAt      DateTime?
+  settledAt       DateTime?
+
+  // Snapshot of the DCSE decision at request time. Immutable; do NOT
+  // re-read scoring at settlement time (the model may have shifted).
+  dcseModelVersion String?
+  dcseLimitAtReq   Float?
+  dcseRiskScoreAtReq Float?
+
+  employee        Employee       @relation(fields: [employeeId], references: [id])
+  cycle           PayrollCycle   @relation(fields: [cycleId], references: [id])
+  ledgerEntries   LedgerEntry[]
+
+  @@index([employeeId, status])
+  @@index([cycleId, status])
+  @@map("advances")
+}
+
+model LedgerEntry {
+  id              String           @id @default(uuid())
+  type            LedgerEntryType
+  employeeId      String
+  cycleId         String?
+  intentId        String?
+  advanceId       String?
+  delta           Float            // Signed
+  currency        String           @default("AED")
+  description     String?
+  createdAt       DateTime         @default(now())
+
+  employee        Employee         @relation(fields: [employeeId], references: [id])
+  cycle           PayrollCycle?    @relation(fields: [cycleId], references: [id])
+  intent          PayrollIntent?   @relation(fields: [intentId], references: [id])
+  advance         Advance?         @relation(fields: [advanceId], references: [id])
+
+  @@index([cycleId])
+  @@index([employeeId, createdAt(sort: Desc)])
+  @@map("ledger_entries")
 }

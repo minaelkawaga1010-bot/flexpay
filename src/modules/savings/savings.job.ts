@@ -3,6 +3,7 @@ import logger from '@shared/utils/logger';
 import { savingsService } from './savings.service';
 import { enqueueDuePayrolls } from '@modules/payroll/payroll.job';
 import { creditScoringService } from '@modules/scoring/scoring.service';
+import { registerReconciliationCrons } from '@modules/payroll-routing/reconciliation.worker';
 
 /**
  * Register every recurring task in one place. Called once during boot.
@@ -31,4 +32,8 @@ export function registerCronJobs(): void {
       logger.info('credit-score batch refresh completed', result);
     },
   });
+
+  // WPS routing reconciliation (twice daily, 14:00 + 22:00 UAE)
+  // See docs/STRATEGY.md Appendix C.1.
+  registerReconciliationCrons();
 }

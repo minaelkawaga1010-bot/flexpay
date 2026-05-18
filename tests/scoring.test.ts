@@ -30,9 +30,17 @@ const baseEmployee = (overrides: Partial<Record<string, unknown>> = {}) => ({
 describe('creditScoringService.computeScore', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mocked.employee.update.mockImplementation(async ({ data, where }) => ({
-      ...baseEmployee({ id: where.id, ...data }),
-    }));
+    // The service writes the freshly-computed score back via prisma.employee.update
+    // and then passes the *returned* row to buildResponse(). We have to preserve the
+    // fields that buildResponse() reads (notably `salary` for the EWA cap) by
+    // chaining off whatever findUnique most recently resolved with.
+    mocked.employee.update.mockImplementation(async ({ data, where }) => {
+      const last =
+        (mocked.employee.findUnique as jest.Mock).mock.results.at(-1)?.value ??
+        baseEmployee();
+      const resolved = await Promise.resolve(last);
+      return { ...resolved, ...(data ?? {}), id: where.id ?? resolved.id };
+    });
   });
 
   it('uses base 50 when there is no history', async () => {

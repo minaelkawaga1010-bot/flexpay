@@ -33,8 +33,12 @@ export class CashbackService {
     const { employeeId, amount, plan, merchantCategory } = input;
     const { rate, cap } = this.config(plan);
 
-    const potential = roundCurrency(amount * rate);
-    if (potential < 0.01) return null;
+    // Short-circuit on the *raw* product, not the rounded value: rounding
+    // 0.005 → 0.01 would otherwise let a 50-fil purchase still earn
+    // cashback, which is the bug the "sub-cent" test guards against.
+    const rawPotential = amount * rate;
+    if (rawPotential < 0.01) return null;
+    const potential = roundCurrency(rawPotential);
 
     const monthStart = new Date();
     monthStart.setUTCDate(1);

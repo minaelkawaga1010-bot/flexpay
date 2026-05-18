@@ -1037,13 +1037,169 @@ Priority order is dictated by **survival metrics first** (pre-seed), then **PMF 
 | 4 | Pre-blueprint | Router-specialist agent topology | Read/write authority boundary on ledger |
 | 5 | Pre-blueprint | B2B SaaS + fixed-fee EWA, not %-rate | Regulatory framing as wage-routing not lending |
 
-### Appendix C — Open questions for next round
+### Appendix C — Locked operational parameters
 
-1. Bin-sponsor SLA terms — what's the contracted webhook latency? Affects reconciliation worker tuning.
-2. HR-tech distribution: which 2–3 vendors are highest-priority for Phase 1 integration?
-3. KYC vendor: building in-house vs. using Sumsub / Onfido — affects compliance plane.
-4. Voice AI ASR provider: Whisper-local vs. Azure Speech (PDPL-compliant variant)?
-5. DCSE accuracy target: what's the production threshold for advance-default <X%? (We need this to set the canary-rollback trigger.)
+These were the open questions at v1.0 compile-time. All resolved.
+
+#### C.1 — Bin-sponsor SLA & reconciliation tuning
+
+- **WPS file processing window**: CBUAE / clearing-bank SIF processing takes
+  **2–6 hours** during official business hours (Mon–Fri).
+- **Reconciliation worker schedule**: twice-daily batch at **14:00 UAE** and
+  **22:00 UAE** (catches the morning + afternoon SIF settlement windows).
+- **Real-time channel**: dedicated webhook listener on the bin-sponsor's
+  Core Banking API for instantaneous card / transaction failure states.
+  Eliminates double-spending surface between batch runs.
+- **Implementation locus**: `src/modules/payroll-routing/reconciliation.worker.ts`
+  (cron) + `src/webhooks/nymcard.webhook.ts` (real-time).
+
+#### C.2 — Phase-1 HR-tech distribution targets
+
+| Vendor | Segment | Why it's the wedge |
+|---|---|---|
+| **Bayzat** | SME / mid-market UAE | Highest-velocity SME signups; payroll + insurance map |
+| **ZenHR** | Regional mid-tier | Daily timesheet logs — primary signal for *accrued-wages-before-WPS-file* (the DCSE input that makes the "Zero-Risk" framing literal, not aspirational) |
+| **Darwinbox / SAP SuccessFactors** | High-density enterprise (Logistics / Construction / Retail) | Where the large blue-collar workforces actually live |
+
+The ZenHR integration in particular is moat-bearing: it gives the DCSE
+**accrued-wage data ahead of the WPS file**, allowing safe pre-cycle
+advances without violating the "advance ≤ accrued portion" invariant.
+
+#### C.3 — DCSE production thresholds & canary-rollback
+
+| Metric | Target | Action |
+|---|---|---|
+| **F1-score** | ≥ 0.88 | Below: block autonomous limit expansion; humans approve all new ceilings |
+| **ROC-AUC** | ≥ 0.85 | Below: same as F1 |
+| **Uncollectible / unsettled advance rate** (per corporate cohort, rolling 30d) | < 1.5% | Above: trigger **automated canary-rollback** of DCSE to prior artifact |
+
+**Failsafe state** (post-rollback): autonomous AI pricing / limit privileges
+are stripped. Hard-coded safety guardrail re-engages, capping per-user
+exposure at **20% of verifiable accrued wages** (from HR-tech attendance
+data) until the DCSE artifact is re-promoted by a two-person rule.
+
+**Implementation locus**: `src/modules/scoring/scoring.service.ts` exposes
+a `getActiveModelArtifact()` that consults a `dcse_model_state` row; the
+canary worker writes to that row on threshold breach. The atomic
+settlement function reads the failsafe flag and applies the 20% cap if
+set, independent of the DCSE's own output.
+
+#### C.4 — KYC vendor
+
+Deferred to KYC-design pass (separate doc). Sumsub vs Onfido decision
+pending pricing-tier negotiation; both are PDPL-compliant with local
+sub-processing agreements available.
+
+#### C.5 — Voice AI ASR provider
+
+Deferred to Voice-product pass (P1 milestone). Constraint: must run
+locally for any prompt classified `FINANCIAL_CORE` or `PII`; Whisper-large-v3
+on the UAE-local GPU plane is the default position. Azure Speech only
+considered for non-sensitive luxury-side voice flows.
+
+---
+
+### Appendix D — Core sequence: advance request → cycle settlement
+
+The sequence below is the canonical happy-path flow that the Prisma
+transaction layer at `src/modules/payroll-routing/` implements.
+
+```
+ ┌────────┐   ┌──────────┐   ┌───────────┐   ┌─────────┐   ┌──────────┐   ┌──────────┐   ┌────────┐
+ │ Worker │   │ Mobile   │   │ Backend   │   │  DCSE   │   │ Postgres │   │ NymCard  │   │ ZenHR  │
+ │        │   │ (RN app) │   │ Express   │   │ (local) │   │  (RDS)   │   │ (rail)   │   │ (HR)   │
+ └───┬────┘   └────┬─────┘   └─────┬─────┘   └────┬────┘   └────┬─────┘   └────┬─────┘   └───┬────┘
+     │             │               │              │             │              │             │
+     │ open app    │               │              │             │              │             │
+     │────────────►│               │              │             │              │             │
+     │             │ GET /ewa/quote│              │             │              │             │
+     │             │ (cycleId, amt)│              │             │              │             │
+     │             │──────────────►│              │             │              │             │
+     │             │               │ score(uid)   │             │              │             │
+     │             │               │─────────────►│             │              │             │
+     │             │               │◄─────────────│             │              │             │
+     │             │               │  limit=420   │             │              │             │
+     │             │               │ accrued?     │             │              │             │
+     │             │               │──────────────────────────────────────────────────────► │
+     │             │               │◄────────────────────────────────────────────────────── │
+     │             │               │  accrued=480 │             │              │             │
+     │             │               │              │             │              │             │
+     │             │ ◄ quote (420, fee:5)         │             │              │             │
+     │             │◄──────────────│              │             │              │             │
+     │ tap "Send"  │               │              │             │              │             │
+     │────────────►│ POST /ewa/req │              │             │              │             │
+     │             │  (idem-key)   │              │             │              │             │
+     │             │──────────────►│              │             │              │             │
+     │             │               │ BEGIN tx     │             │              │             │
+     │             │               │─────────────────────────►  │              │             │
+     │             │               │  1. cycle status check     │              │             │
+     │             │               │  2. intent.accruedAmount   │              │             │
+     │             │               │     check (I1)             │              │             │
+     │             │               │  3. INSERT advance (RES)   │              │             │
+     │             │               │  4. INSERT ledger entry    │              │             │
+     │             │               │     (ADVANCE_RESERVE, +amt)│              │             │
+     │             │               │  5. UPDATE wallet (+amt)   │              │             │
+     │             │               │ COMMIT                     │              │             │
+     │             │               │◄─────────────────────────  │              │             │
+     │             │ ◄ {balance, txId, replay:false}            │              │             │
+     │             │◄──────────────│              │             │              │             │
+     │ ◄ "Sent"    │               │              │             │              │             │
+     │◄────────────│               │              │             │              │             │
+     │             │               │              │             │              │             │
+     │             │               │   ... (T+N hours: payday) ...                           │
+     │             │               │              │             │              │             │
+     │             │               │ WPS file in  │             │              │             │
+     │             │               │ via SFTP     │             │              │             │
+     │             │               │◄─────────────────────────────────────────────[ employer]│
+     │             │               │ ingest()     │             │              │             │
+     │             │               │ → PayrollIntent[] (PENDING)│              │             │
+     │             │               │              │             │              │             │
+     │             │               │ settleCycle()│             │              │             │
+     │             │               │ BEGIN tx     │             │              │             │
+     │             │               │─────────────────────────►  │              │             │
+     │             │               │  for each intent:          │              │             │
+     │             │               │    for each RESERVED adv:  │              │             │
+     │             │               │      check I1+I2+I4 +FSM   │              │             │
+     │             │               │      UPDATE adv→SETTLED    │              │             │
+     │             │               │      INSERT ledger entry   │              │             │
+     │             │               │        (ADVANCE_SETTLE,-amt)             │             │
+     │             │               │    UPDATE wallet (+residual)             │             │
+     │             │               │    INSERT ledger entry     │              │             │
+     │             │               │      (PAYROLL_RESIDUAL,+r) │              │             │
+     │             │               │    UPDATE intent→ROUTED    │              │             │
+     │             │               │  UPDATE cycle→SETTLED      │              │             │
+     │             │               │ COMMIT                     │              │             │
+     │             │               │◄─────────────────────────  │              │             │
+     │             │               │              │             │              │             │
+     │             │               │ rail.post(consolidatedTxns)│             │              │
+     │             │               │───────────────────────────────────────► │              │
+     │             │               │◄────────────────────────────────────────│              │
+     │             │               │              │             │              │             │
+     │             │               │  ... 14:00 / 22:00 ...     │              │             │
+     │             │               │ recon worker │             │              │             │
+     │             │               │ Σ delta=0?   │             │              │             │
+     │             │               │─────────────────────────► [if drift]      │             │
+     │             │               │              │             │ → cycle FAILED              │
+     │             │               │              │             │ → AuditLog                  │
+     │             │               │              │             │ → ops paged                 │
+```
+
+### Appendix E — Pre-WPS-file pre-cycle advance flow
+
+The ZenHR integration (Appendix C.2) enables this loop to begin **before**
+the WPS file lands. `PayrollIntent.accruedAmount` is materialised from
+HR-tech attendance data at the start of the cycle and incremented daily:
+
+```
+Day 1 of cycle  → empty intents          (accruedAmount = 0)
+Day 7 attendance → intent.accruedAmount = 7/30 × monthly salary
+Day 15 advance  → user requests 300 AED; I1 holds because accrued=1700
+Day 30 WPS file → grossAmount fills; settleCycle proceeds
+```
+
+The DCSE limit at request time is the *lesser* of (a) the model's
+recommendation and (b) `intent.accruedAmount - fee` — a hard ceiling
+that no client request can override.
 
 ---
 
