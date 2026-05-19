@@ -1,0 +1,11 @@
+node_modules/
+ios/Pods/
+ios/build/
+android/build/
+android/app/build/
+.gradle/
+*.log
+.DS_Store
+*.xcuserstate
+*.iml
+local.properties

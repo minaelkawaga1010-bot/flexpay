@@ -1,0 +1,3382 @@
+openapi: 3.1.0
+
+info:
+  title: FlexPay Digital Wallet API
+  version: 2.0.0
+  description: |
+    AI-powered digital wallet platform for UAE migrant workers.
+    Features: Wallet management, P2P transfers, international remittance,
+    virtual/physical cards, social savings (Hafiza), AI credit scoring,
+    loyalty rewards, payroll processing, micro-loans, voice AI assistant.
+
+  contact:
+    name: FlexPay API Support
+    email: api-support@flexpay.ae
+    url: https://flexpay.ae/support
+
+  license:
+    name: Proprietary
+    url: https://flexpay.ae/license
+
+servers:
+  - url: https://api.flexpay.ae/v1
+    description: Production (AWS me-central-1)
+  - url: https://staging-api.flexpay.ae/v1
+    description: Staging
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Auth
+    description: Authentication and authorization endpoints
+  - name: Wallet
+    description: Wallet management and balance operations
+  - name: Cards
+    description: Virtual and physical card management
+  - name: Transactions
+    description: Transaction history and queries
+  - name: Remittance
+    description: International remittance and beneficiary management
+  - name: Hafiza
+    description: Social savings circles (Hafiza)
+  - name: Savings
+    description: Personal savings goals
+  - name: Payroll
+    description: Payroll processing and scheduling
+  - name: CreditScore
+    description: AI-powered credit scoring
+  - name: Loyalty
+    description: Loyalty points, tiers, and badges
+  - name: Loans
+    description: Micro-loan management
+  - name: Offers
+    description: Promotional offers and campaigns
+  - name: Notifications
+    description: Push and in-app notifications
+  - name: VoiceAI
+    description: Voice AI assistant for voice-driven interactions
+  - name: AML
+    description: Anti-money laundering monitoring and alerts
+  - name: Users
+    description: User search and profile operations
+
+paths:
+  # ──────────────────────────────────────────────
+  # Auth
+  # ──────────────────────────────────────────────
+  /auth/request-otp:
+    post:
+      operationId: requestOtp
+      tags: [Auth]
+      summary: Request a one-time password
+      description: |
+        Sends a 6-digit OTP via SMS to the given phone number.
+        The purpose field determines the flow: LOGIN (existing user),
+        REGISTER (new user), or RESET (password reset).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, purpose]
+              properties:
+                phone:
+                  type: string
+                  description: Phone number in E.164 format (e.g. +971501234567)
+                  example: "+971501234567"
+                  pattern: "^\+[1-9]\d{6,14}$"
+                purpose:
+                  type: string
+                  enum: [LOGIN, REGISTER, RESET]
+                  description: Purpose of the OTP request
+                  example: LOGIN
+      responses:
+        "200":
+          description: OTP sent successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "OTP sent to +971501234567"
+                  expiresIn:
+                    type: integer
+                    description: OTP validity period in seconds
+                    example: 300
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/verify-otp:
+    post:
+      operationId: verifyOtp
+      tags: [Auth]
+      summary: Verify an OTP code
+      description: |
+        Validates the OTP code for the given phone number and purpose.
+        On successful LOGIN verification, returns access and refresh tokens.
+        On successful REGISTER verification, the user must then call /auth/register-company.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, otp, purpose]
+              properties:
+                phone:
+                  type: string
+                  description: Phone number in E.164 format
+                  example: "+971501234567"
+                otp:
+                  type: string
+                  description: 6-digit OTP code
+                  example: "483921"
+                  minLength: 6
+                  maxLength: 6
+                purpose:
+                  type: string
+                  enum: [LOGIN, REGISTER, RESET]
+                  example: LOGIN
+      responses:
+        "200":
+          description: OTP verified successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  verified:
+                    type: boolean
+                    example: true
+                  tokens:
+                    type: object
+                    description: JWT tokens (returned only for LOGIN purpose)
+                    properties:
+                      accessToken:
+                        type: string
+                        example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                      refreshToken:
+                        type: string
+                        example: "dGhpcyBpcyBhIHJlZnJlc2ggdG9rZW4..."
+                      expiresIn:
+                        type: integer
+                        example: 3600
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/register-company:
+    post:
+      operationId: registerCompany
+      tags: [Auth]
+      summary: Register a new company account
+      description: |
+        Completes company registration after OTP verification.
+        Creates a new user with the company role, associates a trade license,
+        and returns JWT tokens for immediate authentication.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, otp, fullName, email, companyName, tradeLicense, password, companyType]
+              properties:
+                phone:
+                  type: string
+                  example: "+971501234567"
+                otp:
+                  type: string
+                  example: "483921"
+                fullName:
+                  type: string
+                  description: Full name of the account holder
+                  example: "Ahmed Al Mansouri"
+                  minLength: 2
+                  maxLength: 100
+                email:
+                  type: string
+                  format: email
+                  example: "ahmed@company.ae"
+                companyName:
+                  type: string
+                  description: Registered company name
+                  example: "Al Mansouri Enterprises LLC"
+                  minLength: 2
+                  maxLength: 200
+                tradeLicense:
+                  type: string
+                  description: UAE trade license number
+                  example: "CN-1234567"
+                password:
+                  type: string
+                  format: password
+                  description: Minimum 8 characters with at least one uppercase, one lowercase, and one digit
+                  example: "SecurePass123"
+                  minLength: 8
+                companyType:
+                  type: string
+                  enum: [CONTRACTOR, SUBCONTRACTOR, AGENCY]
+                  description: Type of company registration
+                  example: CONTRACTOR
+      responses:
+        "200":
+          description: Company registered successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  user:
+                    $ref: "#/components/schemas/User"
+                  tokens:
+                    type: object
+                    properties:
+                      accessToken:
+                        type: string
+                      refreshToken:
+                        type: string
+                      expiresIn:
+                        type: integer
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/refresh:
+    post:
+      operationId: refreshToken
+      tags: [Auth]
+      summary: Refresh an access token
+      description: |
+        Exchanges a valid refresh token for a new access token pair.
+        The old refresh token is revoked upon success.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+                  description: The refresh token obtained from login or register
+                  example: "dGhpcyBpcyBhIHJlZnJlc2ggdG9rZW4..."
+      responses:
+        "200":
+          description: Token refreshed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  accessToken:
+                    type: string
+                    example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                  refreshToken:
+                    type: string
+                    example: "bmV3LXJlZnJlc2gtdG9rZW4..."
+                  expiresIn:
+                    type: integer
+                    example: 3600
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/logout:
+    post:
+      operationId: logout
+      tags: [Auth]
+      summary: Log out and revoke tokens
+      description: |
+        Revokes the provided refresh token and invalidates the current session.
+        The access token will also be rejected on subsequent requests.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+                  example: "dGhpcyBpcyBhIHJlZnJlc2ggdG9rZW4..."
+      responses:
+        "200":
+          description: Logged out successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Logged out successfully"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/me:
+    get:
+      operationId: getMe
+      tags: [Auth]
+      summary: Get current authenticated user
+      description: |
+        Returns the profile of the currently authenticated user
+        based on the Bearer token in the Authorization header.
+      responses:
+        "200":
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  user:
+                    $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # Wallet
+  # ──────────────────────────────────────────────
+  /wallet:
+    get:
+      operationId: getWallet
+      tags: [Wallet]
+      summary: Get wallet with all currency balances
+      description: |
+        Returns the authenticated user's wallet including all currency
+        balances (AED, USD, GBP, PHP, INR, PKR, etc.), total equivalent
+        in AED, and wallet metadata.
+      responses:
+        "200":
+          description: Wallet details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  wallet:
+                    $ref: "#/components/schemas/Wallet"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+    post:
+      operationId: topUpWallet
+      tags: [Wallet]
+      summary: Top up wallet balance
+      description: |
+        Adds funds to the user's wallet in the specified currency.
+        Supports AED, USD, GBP, PHP, INR, PKR and other available currencies.
+        The top-up is processed via the configured payment gateway.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, currency]
+              properties:
+                amount:
+                  type: number
+                  format: double
+                  description: Amount to top up (minimum 1.00)
+                  example: 500.00
+                  minimum: 1.0
+                currency:
+                  type: string
+                  description: ISO 4217 currency code
+                  example: AED
+                  enum: [AED, USD, GBP, PHP, INR, PKR, EUR, BDT, NPR, LKR]
+      responses:
+        "200":
+          description: Top-up successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Wallet topped up successfully"
+                  wallet:
+                    $ref: "#/components/schemas/Wallet"
+                  transaction:
+                    $ref: "#/components/schemas/Transaction"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /wallet/transfer:
+    post:
+      operationId: peerToPeerTransfer
+      tags: [Wallet]
+      summary: Send money to another user (P2P transfer)
+      description: |
+        Transfers funds from the authenticated user's wallet to another
+        registered FlexPay user identified by phone number. Both users
+        must have active wallets. The transfer is instant and irreversible.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [receiverPhone, amount, currency]
+              properties:
+                receiverPhone:
+                  type: string
+                  description: Recipient's phone number in E.164 format
+                  example: "+971509876543"
+                  pattern: "^\+[1-9]\d{6,14}$"
+                amount:
+                  type: number
+                  format: double
+                  description: Amount to transfer
+                  example: 150.00
+                  minimum: 0.5
+                note:
+                  type: string
+                  description: Optional transfer note visible to the recipient
+                  example: "Rent for April"
+                  maxLength: 200
+                currency:
+                  type: string
+                  description: ISO 4217 currency code
+                  example: AED
+                  enum: [AED, USD, GBP, PHP, INR, PKR, EUR, BDT, NPR, LKR]
+      responses:
+        "200":
+          description: Transfer completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Transfer of 150.00 AED completed successfully"
+                  transaction:
+                    $ref: "#/components/schemas/Transaction"
+                  wallet:
+                    $ref: "#/components/schemas/Wallet"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # Cards
+  # ──────────────────────────────────────────────
+  /cards:
+    get:
+      operationId: listCards
+      tags: [Cards]
+      summary: List user's cards
+      description: |
+        Returns all virtual and physical cards associated with the
+        authenticated user's account, including current status,
+        balance, and spending limits.
+      responses:
+        "200":
+          description: List of cards
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  cards:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Card"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+    post:
+      operationId: issueCard
+      tags: [Cards]
+      summary: Issue a new card
+      description: |
+        Issues a new virtual or physical card for the authenticated user.
+        Virtual cards are available instantly; physical cards are shipped
+        within 3-5 business days to the registered address.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type:
+                  type: string
+                  enum: [VIRTUAL, PHYSICAL]
+                  description: Card type to issue
+                  example: VIRTUAL
+      responses:
+        "200":
+          description: Card issued successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Virtual card issued successfully"
+                  card:
+                    $ref: "#/components/schemas/Card"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+    patch:
+      operationId: updateCardStatus
+      tags: [Cards]
+      summary: Update card status
+      description: |
+        Updates the status of an existing card. Cards can be frozen
+        (temporarily disabled), blocked (permanently disabled), or
+        re-activated from a frozen state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cardId, status]
+              properties:
+                cardId:
+                  type: string
+                  format: uuid
+                  description: Unique card identifier
+                  example: "550e8400-e29b-41d4-a716-446655440001"
+                status:
+                  type: string
+                  enum: [ACTIVE, FROZEN, BLOCKED]
+                  description: New card status
+                  example: FROZEN
+      responses:
+        "200":
+          description: Card status updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Card frozen successfully"
+                  card:
+                    $ref: "#/components/schemas/Card"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /cards/{id}/transactions:
+    get:
+      operationId: getCardTransactions
+      tags: [Cards]
+      summary: Get card transaction history
+      description: |
+        Returns the transaction history for a specific card, including
+        purchases, top-ups, refunds, and fee deductions ordered by
+        most recent first.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Card UUID
+          schema:
+            type: string
+            format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440001"
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+          description: Page number
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+          description: Items per page
+      responses:
+        "200":
+          description: Card transactions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  cardId:
+                    type: string
+                    format: uuid
+                  transactions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Transaction"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # Transactions
+  # ──────────────────────────────────────────────
+  /transactions:
+    get:
+      operationId: listTransactions
+      tags: [Transactions]
+      summary: List transactions with filters
+      description: |
+        Returns a paginated list of the authenticated user's transactions.
+        Supports filtering by type (TRANSFER, TOPUP, REMITTANCE, CARD_PAYMENT)
+        and status (COMPLETED, PENDING, FAILED).
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [TRANSFER, TOPUP, REMITTANCE, CARD_PAYMENT, REFUND, LOAN_DISBURSEMENT, LOAN_REPAYMENT, SALARY]
+          description: Filter by transaction type
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [COMPLETED, PENDING, FAILED, CANCELLED]
+          description: Filter by transaction status
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+          description: Page number
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+          description: Items per page
+      responses:
+        "200":
+          description: Paginated transaction list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  transactions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Transaction"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # Remittance
+  # ──────────────────────────────────────────────
+  /remittance:
+    get:
+      operationId: getRemittanceDashboard
+      tags: [Remittance]
+      summary: Get remittance dashboard data
+      description: |
+        Returns the user's saved beneficiaries, current exchange rates
+        for supported corridors, and the applicable fee rate.
+        Used to populate the remittance form before sending.
+      responses:
+        "200":
+          description: Remittance dashboard data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  beneficiaries:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Beneficiary"
+                  exchangeRates:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        sourceCurrency:
+                          type: string
+                          example: AED
+                        targetCurrency:
+                          type: string
+                          example: PHP
+                        rate:
+                          type: number
+                          format: double
+                          example: 15.42
+                        lastUpdated:
+                          type: string
+                          format: date-time
+                          example: "2026-04-26T10:30:00Z"
+                  feeRate:
+                    type: number
+                    format: double
+                    description: Fee as a percentage of transfer amount
+                    example: 1.5
+                  estimatedDelivery:
+                    type: string
+                    description: Typical delivery time
+                    example: "Instant to 2 hours"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+    post:
+      operationId: sendRemittance
+      tags: [Remittance]
+      summary: Send an international remittance
+      description: |
+        Initiates an international money transfer to a saved beneficiary.
+        The amount is debited from the user's AED wallet, converted at
+        the current exchange rate, and delivered to the beneficiary's
+        bank account or mobile wallet.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [beneficiaryId, amount, currency]
+              properties:
+                beneficiaryId:
+                  type: string
+                  format: uuid
+                  description: UUID of the saved beneficiary
+                  example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                amount:
+                  type: number
+                  format: double
+                  description: Amount in AED to send
+                  example: 1000.00
+                  minimum: 50.0
+                currency:
+                  type: string
+                  description: Target currency for the remittance
+                  example: PHP
+                  enum: [PHP, INR, PKR, BDT, NPR, LKR, USD, GBP, EUR, SOS]
+      responses:
+        "200":
+          description: Remittance initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Remittance of 1000.00 AED to PHP initiated"
+                  remittance:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      trackingNumber:
+                        type: string
+                        example: "FPX-2026-ABCD1234"
+                      amountAED:
+                        type: number
+                        example: 1000.00
+                      amountTarget:
+                        type: number
+                        example: 15420.00
+                      targetCurrency:
+                        type: string
+                        example: PHP
+                      exchangeRate:
+                        type: number
+                        example: 15.42
+                      fee:
+                        type: number
+                        example: 15.00
+                      status:
+                        type: string
+                        example: PROCESSING
+                      estimatedDelivery:
+                        type: string
+                        example: "2026-04-26T14:00:00Z"
+                  transaction:
+                    $ref: "#/components/schemas/Transaction"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # Hafiza (Social Savings)
+  # ──────────────────────────────────────────────
+  /hafiza:
+    get:
+      operationId: listHafizaCircles
+      tags: [Hafiza]
+      summary: List Hafiza savings circles
+      description: |
+        Returns all Hafiza (social savings) circles the user belongs to,
+        including circle details, member count, current turn, and
+        contribution status for each circle.
+      responses:
+        "200":
+          description: List of Hafiza circles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  circles:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/HafizaCircle"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+    post:
+      operationId: createHafizaCircle
+      tags: [Hafiza]
+      summary: Create a new Hafiza savings circle
+      description: |
+        Creates a new Hafiza (ROSCA - Rotating Savings and Credit Association)
+        circle. The creator becomes the first member and the circle opens
+        for others to join. Members take turns receiving the pooled contribution.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, description, monthlyAmount, maxMembers]
+              properties:
+                name:
+                  type: string
+                  description: Circle name
+                  example: "Family Savings Group"
+                  minLength: 3
+                  maxLength: 100
+                description:
+                  type: string
+                  description: Circle description or rules
+                  example: "Monthly contributions of 500 AED, members take turns"
+                  maxLength: 500
+                monthlyAmount:
+                  type: number
+                  format: double
+                  description: Monthly contribution amount per member in AED
+                  example: 500.00
+                  minimum: 50.0
+                maxMembers:
+                  type: integer
+                  description: Maximum number of members in the circle
+                  example: 12
+                  minimum: 2
+                  maximum: 50
+      responses:
+        "200":
+          description: Circle created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Hafiza circle created successfully"
+                  circle:
+                    $ref: "#/components/schemas/HafizaCircle"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /hafiza/{id}/pay:
+    post:
+      operationId: payHafizaTurn
+      tags: [Hafiza]
+      summary: Pay contribution for current turn
+      description: |
+        Processes the user's contribution for the current Hafiza turn.
+        The amount is debited from the user's wallet and pooled.
+        Once all members have paid, the pooled amount is disbursed
+        to the current turn's recipient.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Hafiza circle UUID
+          schema:
+            type: string
+            format: uuid
+          example: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+      responses:
+        "200":
+          description: Payment processed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Contribution of 500.00 AED paid successfully"
+                  transaction:
+                    $ref: "#/components/schemas/Transaction"
+                  circle:
+                    $ref: "#/components/schemas/HafizaCircle"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # Savings Goals
+  # ──────────────────────────────────────────────
+  /savings-goals:
+    get:
+      operationId: listSavingsGoals
+      tags: [Savings]
+      summary: List user's savings goals
+      description: |
+        Returns all active and completed savings goals for the authenticated
+        user, including current balance, target amount, progress percentage,
+        and next auto-contribution date.
+      responses:
+        "200":
+          description: List of savings goals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  goals:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SavingsGoal"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+    post:
+      operationId: createSavingsGoal
+      tags: [Savings]
+      summary: Create a new savings goal
+      description: |
+        Creates a new personal savings goal with an optional auto-contribution
+        schedule. Auto-contributions are debited from the wallet at the
+        specified frequency.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, targetAmount]
+              properties:
+                name:
+                  type: string
+                  description: Name of the savings goal
+                  example: "Emergency Fund"
+                  minLength: 2
+                  maxLength: 100
+                targetAmount:
+                  type: number
+                  format: double
+                  description: Target amount to save
+                  example: 10000.00
+                  minimum: 100.0
+                currency:
+                  type: string
+                  description: Currency for the goal (defaults to AED)
+                  example: AED
+                  default: AED
+                category:
+                  type: string
+                  description: Category for the savings goal
+                  example: EMERGENCY
+                  enum: [EMERGENCY, EDUCATION, HEALTH, TRAVEL, INVESTMENT, GIFT, GENERAL]
+                autoContributeAmount:
+                  type: number
+                  format: double
+                  description: Amount to auto-contribute at each interval
+                  example: 500.00
+                  minimum: 10.0
+                autoContributeFrequency:
+                  type: string
+                  description: How often to auto-contribute
+                  example: MONTHLY
+                  enum: [WEEKLY, BIWEEKLY, MONTHLY]
+      responses:
+        "200":
+          description: Savings goal created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Savings goal created successfully"
+                  goal:
+                    $ref: "#/components/schemas/SavingsGoal"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /savings-goals/{id}/contribute:
+    post:
+      operationId: contributeToSavingsGoal
+      tags: [Savings]
+      summary: Contribute to a savings goal
+      description: |
+        Manually adds funds from the specified source to a savings goal.
+        The amount is debited from the user's wallet and credited to the
+        goal's current balance.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Savings goal UUID
+          schema:
+            type: string
+            format: uuid
+          example: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, source]
+              properties:
+                amount:
+                  type: number
+                  format: double
+                  description: Amount to contribute
+                  example: 1000.00
+                  minimum: 1.0
+                source:
+                  type: string
+                  enum: [WALLET, SALARY, EXTERNAL]
+                  description: Source of the contribution
+                  example: WALLET
+      responses:
+        "200":
+          description: Contribution successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Contribution of 1000.00 AED added to Emergency Fund"
+                  goal:
+                    $ref: "#/components/schemas/SavingsGoal"
+                  transaction:
+                    $ref: "#/components/schemas/Transaction"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # Payroll
+  # ──────────────────────────────────────────────
+  /payroll:
+    get:
+      operationId: listPayrollRuns
+      tags: [Payroll]
+      summary: List payroll runs
+      description: |
+        Returns a paginated list of payroll runs for the company.
+        Supports filtering by status and date range. Available to
+        company admin users only.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, PROCESSING, COMPLETED, FAILED, CANCELLED]
+          description: Filter by payroll status
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Start date filter (YYYY-MM-DD)
+          example: "2026-04-01"
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+          description: End date filter (YYYY-MM-DD)
+          example: "2026-04-30"
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: List of payroll runs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  payrolls:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Payroll"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /payroll/run:
+    post:
+      operationId: runPayroll
+      tags: [Payroll]
+      summary: Execute a payroll run
+      description: |
+        Initiates a payroll run for the specified company. Disburses salary
+        to employee wallets. Optionally accepts a list of specific employee
+        IDs; if omitted, all active employees are paid.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [companyUserId]
+              properties:
+                companyUserId:
+                  type: string
+                  format: uuid
+                  description: UUID of the company user initiating the payroll
+                  example: "d4e5f6a7-b8c9-0123-defa-234567890123"
+                employeeUserIds:
+                  type: array
+                  description: Optional list of specific employee UUIDs to pay
+                  items:
+                    type: string
+                    format: uuid
+                  example:
+                    - "e5f6a7b8-c9d0-1234-efab-345678901234"
+                    - "f6a7b8c9-d0e1-2345-fabc-456789012345"
+      responses:
+        "200":
+          description: Payroll run initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Payroll run initiated for 25 employees"
+                  payroll:
+                    $ref: "#/components/schemas/Payroll"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /payroll/schedules:
+    get:
+      operationId: listPayrollSchedules
+      tags: [Payroll]
+      summary: List payroll schedules
+      description: |
+        Returns all active and inactive payroll schedules for the company.
+        Optionally filter by a specific company user.
+      parameters:
+        - name: companyUserId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Filter by company user UUID
+          example: "d4e5f6a7-b8c9-0123-defa-234567890123"
+      responses:
+        "200":
+          description: List of payroll schedules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  schedules:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PayrollSchedule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+    post:
+      operationId: createPayrollSchedule
+      tags: [Payroll]
+      summary: Create a payroll schedule
+      description: |
+        Creates a new recurring payroll schedule. The system will
+        automatically initiate payroll on the scheduled dates based
+        on the specified frequency and pay day.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [companyUserId, name, frequency, payDay]
+              properties:
+                companyUserId:
+                  type: string
+                  format: uuid
+                  description: UUID of the company user
+                  example: "d4e5f6a7-b8c9-0123-defa-234567890123"
+                name:
+                  type: string
+                  description: Schedule name
+                  example: "Monthly Salary - All Staff"
+                  minLength: 2
+                  maxLength: 200
+                frequency:
+                  type: string
+                  enum: [WEEKLY, BIWEEKLY, MONTHLY]
+                  description: Payroll frequency
+                  example: MONTHLY
+                payDay:
+                  type: integer
+                  description: Day of month to run payroll (1-28 for monthly, 1-14 for weekly/biweekly)
+                  example: 28
+                  minimum: 1
+                  maximum: 28
+      responses:
+        "200":
+          description: Schedule created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Payroll schedule created successfully"
+                  schedule:
+                    $ref: "#/components/schemas/PayrollSchedule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /payroll/schedules/{id}:
+    patch:
+      operationId: updatePayrollSchedule
+      tags: [Payroll]
+      summary: Update a payroll schedule
+      description: |
+        Updates an existing payroll schedule. All fields are optional;
+        only provided fields will be updated.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Schedule UUID
+          schema:
+            type: string
+            format: uuid
+          example: "e5f6a7b8-c9d0-1234-efab-345678901234"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: Updated schedule name
+                  example: "Monthly Salary - Updated"
+                  minLength: 2
+                  maxLength: 200
+                frequency:
+                  type: string
+                  enum: [WEEKLY, BIWEEKLY, MONTHLY]
+                  description: Updated payroll frequency
+                  example: BIWEEKLY
+                payDay:
+                  type: integer
+                  description: Updated pay day
+                  example: 15
+                  minimum: 1
+                  maximum: 28
+                isActive:
+                  type: boolean
+                  description: Activate or deactivate the schedule
+                  example: true
+      responses:
+        "200":
+          description: Schedule updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Payroll schedule updated successfully"
+                  schedule:
+                    $ref: "#/components/schemas/PayrollSchedule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /payroll/stats:
+    get:
+      operationId: getPayrollStats
+      tags: [Payroll]
+      summary: Get payroll statistics
+      description: |
+        Returns aggregated payroll statistics for the company including
+        total disbursed, average salary, number of employees paid,
+        and month-over-month trends.
+      responses:
+        "200":
+          description: Payroll statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  stats:
+                    type: object
+                    properties:
+                      totalDisbursed:
+                        type: number
+                        format: double
+                        example: 287500.00
+                      totalDisbursedCurrency:
+                        type: string
+                        example: AED
+                      averageSalary:
+                        type: number
+                        format: double
+                        example: 5750.00
+                      employeesPaid:
+                        type: integer
+                        example: 50
+                      totalPayrollRuns:
+                        type: integer
+                        example: 12
+                      thisMonth:
+                        type: object
+                        properties:
+                          amount:
+                            type: number
+                            example: 287500.00
+                          runs:
+                            type: integer
+                            example: 1
+                      lastMonth:
+                        type: object
+                        properties:
+                          amount:
+                            type: number
+                            example: 285000.00
+                          runs:
+                            type: integer
+                            example: 1
+                      monthOverMonthChange:
+                        type: number
+                        description: Percentage change from last month
+                        example: 0.88
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # Credit Score
+  # ──────────────────────────────────────────────
+  /credit-score:
+    get:
+      operationId: getCreditScore
+      tags: [CreditScore]
+      summary: Get AI credit score
+      description: |
+        Returns the user's AI-generated credit score, risk band,
+        contributing factors, and historical score progression.
+        The score is calculated using ML models analyzing transaction
+        patterns, repayment history, savings behavior, and employment
+        stability.
+      responses:
+        "200":
+          description: Credit score details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  creditScore:
+                    type: object
+                    properties:
+                      score:
+                        type: integer
+                        description: Credit score (300-850)
+                        example: 720
+                        minimum: 300
+                        maximum: 850
+                      band:
+                        type: string
+                        description: Risk classification band
+                        example: GOOD
+                        enum: [EXCELLENT, GOOD, FAIR, POOR, VERY_POOR]
+                      lastUpdated:
+                        type: string
+                        format: date-time
+                        example: "2026-04-25T08:00:00Z"
+                      factors:
+                        type: array
+                        description: Key factors affecting the score
+                        items:
+                          type: object
+                          properties:
+                            name:
+                              type: string
+                              example: "Repayment History"
+                            impact:
+                              type: string
+                              enum: [POSITIVE, NEGATIVE, NEUTRAL]
+                              example: POSITIVE
+                            description:
+                              type: string
+                              example: "All loan payments made on time"
+                      history:
+                        type: array
+                        description: Monthly score history (last 12 months)
+                        items:
+                          type: object
+                          properties:
+                            month:
+                              type: string
+                              format: date
+                              example: "2026-03"
+                            score:
+                              type: integer
+                              example: 715
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # Loyalty
+  # ──────────────────────────────────────────────
+  /loyalty:
+    get:
+      operationId: getLoyaltyStatus
+      tags: [Loyalty]
+      summary: Get loyalty points and tier
+      description: |
+        Returns the user's current loyalty points balance, tier status,
+        earned badges, and progress toward the next tier.
+        Tiers: BRONZE (0), SILVER (1000), GOLD (5000), PLATINUM (20000).
+      responses:
+        "200":
+          description: Loyalty status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  loyalty:
+                    type: object
+                    properties:
+                      points:
+                        type: integer
+                        description: Current points balance
+                        example: 3250
+                      tier:
+                        type: string
+                        description: Current loyalty tier
+                        example: GOLD
+                        enum: [BRONZE, SILVER, GOLD, PLATINUM]
+                      tierProgress:
+                        type: object
+                        properties:
+                          currentTier:
+                            type: string
+                            example: GOLD
+                          nextTier:
+                            type: string
+                            example: PLATINUM
+                          pointsEarned:
+                            type: integer
+                            example: 3250
+                          pointsRequired:
+                            type: integer
+                            description: Total points needed for next tier
+                            example: 20000
+                          progressPercentage:
+                            type: number
+                            description: Progress toward next tier (0-100)
+                            example: 16.25
+                      badges:
+                        type: array
+                        description: Earned loyalty badges
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                              example: "first_transfer"
+                            name:
+                              type: string
+                              example: "First Transfer"
+                            description:
+                              type: string
+                              example: "Completed your first P2P transfer"
+                            earnedAt:
+                              type: string
+                              format: date-time
+                              example: "2026-01-15T10:30:00Z"
+                            icon:
+                              type: string
+                              example: "🚀"
+                      monthlyPointsBreakdown:
+                        type: object
+                        properties:
+                          earned:
+                            type: integer
+                            example: 450
+                          redeemed:
+                            type: integer
+                            example: 100
+                          expired:
+                            type: integer
+                            example: 0
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # Loans
+  # ──────────────────────────────────────────────
+  /loans:
+    get:
+      operationId: listLoans
+      tags: [Loans]
+      summary: List user's loans
+      description: |
+        Returns all loans associated with the authenticated user,
+        including active, completed, and rejected applications.
+      responses:
+        "200":
+          description: List of loans
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  loans:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Loan"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /loans/apply:
+    post:
+      operationId: applyForLoan
+      tags: [Loans]
+      summary: Apply for a micro-loan
+      description: |
+        Submits a micro-loan application. The system uses the AI credit
+        score to determine eligibility and interest rate. Loan amounts
+        range from 500 to 20,000 AED with terms of 3 to 24 months.
+        The application is reviewed and a decision is returned within
+        minutes for pre-qualified applicants.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, purpose, termMonths]
+              properties:
+                amount:
+                  type: number
+                  format: double
+                  description: Requested loan amount in AED
+                  example: 5000.00
+                  minimum: 500.0
+                  maximum: 20000.0
+                purpose:
+                  type: string
+                  description: Purpose of the loan
+                  example: "Home renovation"
+                  enum: [EMERGENCY, EDUCATION, HEALTH, HOME, BUSINESS, PERSONAL, OTHER]
+                termMonths:
+                  type: integer
+                  description: Loan repayment term in months
+                  example: 6
+                  minimum: 3
+                  maximum: 24
+      responses:
+        "200":
+          description: Loan application submitted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Loan application submitted successfully"
+                  loan:
+                    $ref: "#/components/schemas/Loan"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /loans/{id}:
+    get:
+      operationId: getLoanDetails
+      tags: [Loans]
+      summary: Get loan details
+      description: |
+        Returns detailed information about a specific loan including
+        repayment schedule, outstanding balance, next payment due,
+        and transaction history.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Loan UUID
+          schema:
+            type: string
+            format: uuid
+          example: "f6a7b8c9-d0e1-2345-fabc-456789012345"
+      responses:
+        "200":
+          description: Loan details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  loan:
+                    $ref: "#/components/schemas/Loan"
+                  repaymentSchedule:
+                    type: array
+                    description: Upcoming repayment installments
+                    items:
+                      type: object
+                      properties:
+                        installmentNumber:
+                          type: integer
+                          example: 3
+                        dueDate:
+                          type: string
+                          format: date
+                          example: "2026-07-15"
+                        amount:
+                          type: number
+                          format: double
+                          example: 883.33
+                        principal:
+                          type: number
+                          format: double
+                          example: 833.33
+                        interest:
+                          type: number
+                          format: double
+                          example: 50.00
+                        status:
+                          type: string
+                          enum: [PENDING, PAID, OVERDUE]
+                          example: PENDING
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /loans/{id}/repay:
+    post:
+      operationId: repayLoan
+      tags: [Loans]
+      summary: Make a loan repayment
+      description: |
+        Processes a repayment towards the outstanding loan balance.
+        The amount is debited from the user's wallet. Partial payments
+        are allowed and applied to the oldest outstanding installment first.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Loan UUID
+          schema:
+            type: string
+            format: uuid
+          example: "f6a7b8c9-d0e1-2345-fabc-456789012345"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount:
+                  type: number
+                  format: double
+                  description: Amount to repay in AED
+                  example: 883.33
+                  minimum: 1.0
+      responses:
+        "200":
+          description: Repayment processed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Repayment of 883.33 AED processed successfully"
+                  loan:
+                    $ref: "#/components/schemas/Loan"
+                  transaction:
+                    $ref: "#/components/schemas/Transaction"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # Offers
+  # ──────────────────────────────────────────────
+  /offers:
+    get:
+      operationId: listOffers
+      tags: [Offers]
+      summary: List active offers
+      description: |
+        Returns all currently active promotional offers available to the user.
+        Offers include discounts, cashback, and partner deals.
+        Results are personalized based on user activity and location.
+      responses:
+        "200":
+          description: List of active offers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  offers:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Offer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /offers/{id}/click:
+    post:
+      operationId: trackOfferAction
+      tags: [Offers]
+      summary: Track offer interaction
+      description: |
+        Records a user's interaction with an offer (viewed, clicked, or redeemed).
+        This endpoint is used for analytics and to track conversion funnels.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Offer UUID
+          schema:
+            type: string
+            format: uuid
+          example: "a7b8c9d0-e1f2-3456-abcd-567890123456"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [VIEWED, CLICKED, REDEEMED]
+                  description: Type of interaction
+                  example: CLICKED
+      responses:
+        "200":
+          description: Action recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Offer interaction recorded"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /offers/{id}/stats:
+    get:
+      operationId: getOfferStats
+      tags: [Offers]
+      summary: Get offer performance stats
+      description: |
+        Returns performance statistics for a specific offer including
+        total views, clicks, redemptions, and conversion rate.
+        Available to offer owners and admin users.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Offer UUID
+          schema:
+            type: string
+            format: uuid
+          example: "a7b8c9d0-e1f2-3456-abcd-567890123456"
+      responses:
+        "200":
+          description: Offer statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  stats:
+                    type: object
+                    properties:
+                      offerId:
+                        type: string
+                        format: uuid
+                      totalViews:
+                        type: integer
+                        example: 15420
+                      totalClicks:
+                        type: integer
+                        example: 3870
+                      totalRedemptions:
+                        type: integer
+                        example: 945
+                      clickThroughRate:
+                        type: number
+                        description: CTR as percentage
+                        example: 25.1
+                      conversionRate:
+                        type: number
+                        description: Redemption rate as percentage
+                        example: 6.13
+                      revenueImpact:
+                        type: number
+                        format: double
+                        description: Total revenue generated by the offer
+                        example: 47250.00
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # Notifications
+  # ──────────────────────────────────────────────
+  /notifications:
+    get:
+      operationId: listNotifications
+      tags: [Notifications]
+      summary: List notifications
+      description: |
+        Returns a paginated list of the user's notifications.
+        Supports filtering by type and read status.
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [TRANSACTION, TRANSFER, REMITTANCE, PAYROLL, LOAN, OFFER, SYSTEM, HAFIZA, SAVINGS]
+          description: Filter by notification type
+        - name: isRead
+          in: query
+          schema:
+            type: boolean
+          description: Filter by read status
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: Paginated notifications
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  notifications:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Notification"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+                  unreadCount:
+                    type: integer
+                    example: 5
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /notifications/{id}/read:
+    patch:
+      operationId: markNotificationRead
+      tags: [Notifications]
+      summary: Mark a notification as read
+      description: |
+        Marks a single notification as read. Idempotent — calling
+        this on an already-read notification returns success.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Notification UUID
+          schema:
+            type: string
+            format: uuid
+          example: "b8c9d0e1-f2a3-4567-bcde-678901234567"
+      responses:
+        "200":
+          description: Notification marked as read
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Notification marked as read"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /notifications/read-all:
+    patch:
+      operationId: markAllNotificationsRead
+      tags: [Notifications]
+      summary: Mark all notifications as read
+      description: |
+        Marks all unread notifications for the authenticated user as read.
+        Useful as a "clear all" action in the notifications UI.
+      responses:
+        "200":
+          description: All notifications marked as read
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "All notifications marked as read"
+                  markedCount:
+                    type: integer
+                    example: 12
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # Voice AI
+  # ──────────────────────────────────────────────
+  /voice/process:
+    post:
+      operationId: processVoiceCommand
+      tags: [VoiceAI]
+      summary: Process a voice command
+      description: |
+        Accepts a base64-encoded audio clip, converts it to text (STT),
+        processes the text through the AI assistant to determine intent
+        and generate a response, and returns the response as base64-encoded
+        audio (TTS). Supports Arabic and English by default.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [audioBase64]
+              properties:
+                audioBase64:
+                  type: string
+                  format: byte
+                  description: Base64-encoded audio file (WAV, MP3, or OGG format, max 30 seconds)
+                  example: "UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA="
+                language:
+                  type: string
+                  description: Language code for STT/TTS (defaults to auto-detect)
+                  example: en
+                  default: auto
+                  enum: [auto, en, ar, fil, hi, ur]
+      responses:
+        "200":
+          description: Voice command processed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  transcript:
+                    type: string
+                    description: Transcribed text from audio
+                    example: "What is my current balance?"
+                  intent:
+                    type: string
+                    description: Detected intent
+                    example: "CHECK_BALANCE"
+                  response:
+                    type: string
+                    description: AI-generated text response
+                    example: "Your current AED balance is 4,250.00."
+                  audioResponse:
+                    type: string
+                    format: byte
+                    description: Base64-encoded audio response
+                    example: "UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA="
+                  detectedLanguage:
+                    type: string
+                    description: Auto-detected language code
+                    example: en
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /voice/chat:
+    post:
+      operationId: voiceChat
+      tags: [VoiceAI]
+      summary: Text-based voice AI chat
+      description: |
+        Sends a text message to the AI assistant and receives a
+        text response with an optional audio narration. This is the
+        text-only alternative to the /voice/process endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message:
+                  type: string
+                  description: User's text message to the AI assistant
+                  example: "Send 100 AED to Ahmed"
+                  minLength: 1
+                  maxLength: 500
+                language:
+                  type: string
+                  description: Preferred response language (defaults to auto-detect)
+                  example: en
+                  default: auto
+                  enum: [auto, en, ar, fil, hi, ur]
+      responses:
+        "200":
+          description: AI chat response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  intent:
+                    type: string
+                    description: Detected intent
+                    example: "SEND_MONEY"
+                  response:
+                    type: string
+                    description: AI-generated text response
+                    example: "I found Ahmed (+971509876543). Confirm sending 100.00 AED?"
+                  audioResponse:
+                    type: string
+                    format: byte
+                    description: Base64-encoded audio narration of the response
+                    example: "UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA="
+                  requiresConfirmation:
+                    type: boolean
+                    description: Whether the action requires user confirmation
+                    example: true
+                  confirmationData:
+                    type: object
+                    description: Data for the confirmation prompt (if applicable)
+                    properties:
+                      type:
+                        type: string
+                        example: "TRANSFER"
+                      recipient:
+                        type: string
+                        example: "Ahmed"
+                      amount:
+                        type: number
+                        example: 100.00
+                      currency:
+                        type: string
+                        example: AED
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # AML (Anti-Money Laundering)
+  # ──────────────────────────────────────────────
+  /aml:
+    get:
+      operationId: getAMLAlerts
+      tags: [AML]
+      summary: Get AML alerts and statistics
+      description: |
+        Returns anti-money laundering alerts for the platform.
+        Supports filtering by severity. Includes aggregated statistics
+        on total alerts, resolved alerts, and risk trends. Available
+        to compliance officers and admin users only.
+      parameters:
+        - name: severity
+          in: query
+          schema:
+            type: string
+            enum: [LOW, MEDIUM, HIGH, CRITICAL]
+          description: Filter alerts by severity level
+      responses:
+        "200":
+          description: AML alerts and statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  alerts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AMLAlert"
+                  stats:
+                    type: object
+                    properties:
+                      totalAlerts:
+                        type: integer
+                        example: 142
+                      unresolvedAlerts:
+                        type: integer
+                        example: 23
+                      resolvedToday:
+                        type: integer
+                        example: 5
+                      highSeverityCount:
+                        type: integer
+                        example: 8
+                      criticalSeverityCount:
+                        type: integer
+                        example: 2
+                      alertTrend:
+                        type: string
+                        enum: [INCREASING, STABLE, DECREASING]
+                        example: STABLE
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+    patch:
+      operationId: resolveAMLAlert
+      tags: [AML]
+      summary: Resolve an AML alert
+      description: |
+        Marks an AML alert as resolved or un-resolved. Compliance officers
+        can provide a resolution note when resolving alerts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alertId, isResolved]
+              properties:
+                alertId:
+                  type: string
+                  format: uuid
+                  description: AML alert UUID
+                  example: "c9d0e1f2-a3b4-5678-cdef-789012345678"
+                isResolved:
+                  type: boolean
+                  description: Whether the alert is resolved
+                  example: true
+      responses:
+        "200":
+          description: Alert status updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "AML alert resolved successfully"
+                  alert:
+                    $ref: "#/components/schemas/AMLAlert"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  # ──────────────────────────────────────────────
+  # Users
+  # ──────────────────────────────────────────────
+  /users/search:
+    get:
+      operationId: searchUsersByPhone
+      tags: [Users]
+      summary: Search users by phone number
+      description: |
+        Searches for registered FlexPay users by phone number.
+        Used to find recipients for P2P transfers. Returns partial
+        matches (masked numbers) for privacy protection unless
+        the exact number is provided.
+      parameters:
+        - name: phone
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: "^\+[1-9]\d{6,14}$"
+          description: Phone number to search (E.164 format)
+          example: "+971509876543"
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  users:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                          example: "d0e1f2a3-b4c5-6789-defa-890123456789"
+                        fullName:
+                          type: string
+                          example: "Ahmed Al Mansouri"
+                        phone:
+                          type: string
+                          description: Masked phone number
+                          example: "+97150****543"
+                        avatar:
+                          type: string
+                          nullable: true
+                          example: "https://cdn.flexpay.ae/avatars/ahmed.jpg"
+                        isVerified:
+                          type: boolean
+                          example: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+# ──────────────────────────────────────────────
+# Components
+# ──────────────────────────────────────────────
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JSON Web Token obtained from /auth/verify-otp or /auth/register-company.
+        Include as: Authorization: Bearer <token>
+
+  responses:
+    BadRequest:
+      description: The request body or parameters are invalid
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BadRequestError"
+          example:
+            success: false
+            error:
+              code: "BAD_REQUEST"
+              message: "Validation failed"
+              details:
+                - field: "amount"
+                  message: "Amount must be greater than 0"
+
+    Unauthorized:
+      description: Invalid or expired authentication token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UnauthorizedError"
+          example:
+            success: false
+            error:
+              code: "UNAUTHORIZED"
+              message: "Invalid or expired token"
+
+    NotFound:
+      description: The requested resource was not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/NotFoundError"
+          example:
+            success: false
+            error:
+              code: "NOT_FOUND"
+              message: "Resource not found"
+
+    RateLimited:
+      description: Too many requests — slow down
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RateLimitedError"
+          example:
+            success: false
+            error:
+              code: "RATE_LIMITED"
+              message: "Too many requests. Please try again in 60 seconds."
+              retryAfter: 60
+
+  schemas:
+    # ── Error Schemas ──
+    Error:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Machine-readable error code
+              example: "ERROR_CODE"
+            message:
+              type: string
+              description: Human-readable error message
+              example: "Something went wrong"
+
+    BadRequestError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            error:
+              type: object
+              properties:
+                details:
+                  type: array
+                  description: Field-level validation errors
+                  items:
+                    type: object
+                    properties:
+                      field:
+                        type: string
+                        example: "amount"
+                      message:
+                        type: string
+                        example: "Amount must be greater than 0"
+
+    UnauthorizedError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            error:
+              type: object
+              properties:
+                code:
+                  type: string
+                  example: "UNAUTHORIZED"
+
+    NotFoundError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            error:
+              type: object
+              properties:
+                code:
+                  type: string
+                  example: "NOT_FOUND"
+
+    RateLimitedError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            error:
+              type: object
+              properties:
+                code:
+                  type: string
+                  example: "RATE_LIMITED"
+                retryAfter:
+                  type: integer
+                  description: Seconds until the rate limit resets
+                  example: 60
+
+    # ── Core Domain Schemas ──
+    User:
+      type: object
+      description: FlexPay user profile
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        fullName:
+          type: string
+          example: "Ahmed Al Mansouri"
+        email:
+          type: string
+          format: email
+          example: "ahmed@flexpay.ae"
+        phone:
+          type: string
+          example: "+971501234567"
+        role:
+          type: string
+          enum: [EMPLOYEE, COMPANY, ADMIN]
+          example: EMPLOYEE
+        companyType:
+          type: string
+          enum: [CONTRACTOR, SUBCONTRACTOR, AGENCY]
+          nullable: true
+          example: null
+        companyName:
+          type: string
+          nullable: true
+          example: null
+        avatar:
+          type: string
+          format: uri
+          nullable: true
+          example: "https://cdn.flexpay.ae/avatars/ahmed.jpg"
+        isVerified:
+          type: boolean
+          example: true
+        kycStatus:
+          type: string
+          enum: [PENDING, VERIFIED, REJECTED, NOT_STARTED]
+          example: VERIFIED
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-01-10T08:30:00Z"
+        updatedAt:
+          type: string
+          format: date-time
+          example: "2026-04-26T10:00:00Z"
+
+    Wallet:
+      type: object
+      description: User wallet with multi-currency balances
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440001"
+        userId:
+          type: string
+          format: uuid
+        balances:
+          type: array
+          items:
+            $ref: "#/components/schemas/Balance"
+        totalAED:
+          type: number
+          format: double
+          description: Total balance converted to AED
+          example: 14250.75
+        currency:
+          type: string
+          description: Primary currency
+          example: AED
+        status:
+          type: string
+          enum: [ACTIVE, FROZEN, CLOSED]
+          example: ACTIVE
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-01-10T08:30:00Z"
+
+    Balance:
+      type: object
+      description: Single currency balance
+      properties:
+        currency:
+          type: string
+          example: AED
+        amount:
+          type: number
+          format: double
+          example: 8500.50
+        available:
+          type: number
+          format: double
+          description: Available amount (excluding pending holds)
+          example: 8000.00
+        hold:
+          type: number
+          format: double
+          description: Amount on hold
+          example: 500.50
+
+    Transaction:
+      type: object
+      description: A financial transaction record
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "660e8400-e29b-41d4-a716-446655440002"
+        type:
+          type: string
+          enum: [TRANSFER, TOPUP, REMITTANCE, CARD_PAYMENT, REFUND, LOAN_DISBURSEMENT, LOAN_REPAYMENT, SALARY]
+          example: TRANSFER
+        status:
+          type: string
+          enum: [COMPLETED, PENDING, FAILED, CANCELLED]
+          example: COMPLETED
+        amount:
+          type: number
+          format: double
+          example: 150.00
+        currency:
+          type: string
+          example: AED
+        description:
+          type: string
+          example: "P2P transfer to Ahmed"
+        reference:
+          type: string
+          description: External reference or tracking number
+          example: "FPX-TXN-2026-ABC123"
+        counterparty:
+          type: string
+          nullable: true
+          description: Name or identifier of the other party
+          example: "Ahmed Al Mansouri"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-04-26T10:15:00Z"
+
+    Card:
+      type: object
+      description: Virtual or physical card
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440001"
+        type:
+          type: string
+          enum: [VIRTUAL, PHYSICAL]
+          example: VIRTUAL
+        lastFourDigits:
+          type: string
+          example: "4832"
+        status:
+          type: string
+          enum: [ACTIVE, FROZEN, BLOCKED, PENDING, EXPIRED]
+          example: ACTIVE
+        balance:
+          type: number
+          format: double
+          example: 2000.00
+        currency:
+          type: string
+          example: AED
+        spendingLimit:
+          type: number
+          format: double
+          example: 10000.00
+        spentThisMonth:
+          type: number
+          format: double
+          example: 1250.75
+        expiryDate:
+          type: string
+          description: Card expiry in MM/YY format
+          example: "12/28"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-02-15T09:00:00Z"
+
+    Beneficiary:
+      type: object
+      description: Remittance beneficiary
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        name:
+          type: string
+          example: "Fatima Al Mansouri"
+        relationship:
+          type: string
+          enum: [FAMILY, FRIEND, BUSINESS, SELF]
+          example: FAMILY
+        bankName:
+          type: string
+          example: "BDO Unibank"
+        accountNumber:
+          type: string
+          description: Masked account number
+          example: "****7890"
+        country:
+          type: string
+          example: "PH"
+        countryCode:
+          type: string
+          example: "PHL"
+        currency:
+          type: string
+          example: PHP
+        isDefault:
+          type: boolean
+          example: true
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-01-20T14:00:00Z"
+
+    Payroll:
+      type: object
+      description: Payroll run record
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "d4e5f6a7-b8c9-0123-defa-234567890123"
+        companyUserId:
+          type: string
+          format: uuid
+        companyName:
+          type: string
+          example: "Al Mansouri Enterprises LLC"
+        status:
+          type: string
+          enum: [PENDING, PROCESSING, COMPLETED, FAILED, CANCELLED]
+          example: COMPLETED
+        totalAmount:
+          type: number
+          format: double
+          example: 287500.00
+        currency:
+          type: string
+          example: AED
+        employeeCount:
+          type: integer
+          example: 50
+        successCount:
+          type: integer
+          example: 48
+        failureCount:
+          type: integer
+          example: 2
+        runDate:
+          type: string
+          format: date
+          example: "2026-04-25"
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2026-04-25T09:30:00Z"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-04-25T09:00:00Z"
+
+    PayrollSchedule:
+      type: object
+      description: Recurring payroll schedule
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "e5f6a7b8-c9d0-1234-efab-345678901234"
+        companyUserId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: "Monthly Salary - All Staff"
+        frequency:
+          type: string
+          enum: [WEEKLY, BIWEEKLY, MONTHLY]
+          example: MONTHLY
+        payDay:
+          type: integer
+          example: 28
+        isActive:
+          type: boolean
+          example: true
+        nextRunDate:
+          type: string
+          format: date
+          example: "2026-05-28"
+        lastRunDate:
+          type: string
+          format: date
+          nullable: true
+          example: "2026-04-28"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-01-01T00:00:00Z"
+
+    Loan:
+      type: object
+      description: Micro-loan record
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "f6a7b8c9-d0e1-2345-fabc-456789012345"
+        amount:
+          type: number
+          format: double
+          example: 5000.00
+        currency:
+          type: string
+          example: AED
+        purpose:
+          type: string
+          enum: [EMERGENCY, EDUCATION, HEALTH, HOME, BUSINESS, PERSONAL, OTHER]
+          example: PERSONAL
+        termMonths:
+          type: integer
+          example: 6
+        interestRate:
+          type: number
+          format: double
+          description: Annual interest rate percentage
+          example: 5.0
+        status:
+          type: string
+          enum: [PENDING_APPROVAL, APPROVED, DISBURSED, REPAYING, COMPLETED, REJECTED, DEFAULTED]
+          example: REPAYING
+        outstandingBalance:
+          type: number
+          format: double
+          example: 3500.00
+        nextPaymentDue:
+          type: string
+          format: date
+          nullable: true
+          example: "2026-05-15"
+        nextPaymentAmount:
+          type: number
+          format: double
+          nullable: true
+          example: 883.33
+        disbursedAt:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2026-02-15T10:00:00Z"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-02-10T08:00:00Z"
+
+    HafizaCircle:
+      type: object
+      description: Hafiza social savings circle
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+        name:
+          type: string
+          example: "Family Savings Group"
+        description:
+          type: string
+          example: "Monthly contributions of 500 AED"
+        monthlyAmount:
+          type: number
+          format: double
+          example: 500.00
+        currency:
+          type: string
+          example: AED
+        maxMembers:
+          type: integer
+          example: 12
+        currentMembers:
+          type: integer
+          example: 8
+        creatorId:
+          type: string
+          format: uuid
+        currentTurnIndex:
+          type: integer
+          description: Index of the member receiving this turn
+          example: 3
+        currentTurnMemberName:
+          type: string
+          description: Name of the member whose turn it is
+          example: "Ahmed Al Mansouri"
+        totalPoolAmount:
+          type: number
+          format: double
+          description: Total amount in the current pool
+          example: 4000.00
+        status:
+          type: string
+          enum: [OPEN, ACTIVE, COMPLETED, CANCELLED]
+          example: ACTIVE
+        userContributionStatus:
+          type: string
+          enum: [PAID, UNPAID, OVERDUE]
+          description: Current user's contribution status for this turn
+          example: PAID
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-01-05T12:00:00Z"
+
+    SavingsGoal:
+      type: object
+      description: Personal savings goal
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+        name:
+          type: string
+          example: "Emergency Fund"
+        targetAmount:
+          type: number
+          format: double
+          example: 10000.00
+        currentAmount:
+          type: number
+          format: double
+          example: 6500.00
+        currency:
+          type: string
+          example: AED
+        category:
+          type: string
+          enum: [EMERGENCY, EDUCATION, HEALTH, TRAVEL, INVESTMENT, GIFT, GENERAL]
+          example: EMERGENCY
+        progressPercentage:
+          type: number
+          description: Progress toward the target (0-100)
+          example: 65.0
+        status:
+          type: string
+          enum: [ACTIVE, COMPLETED, CANCELLED]
+          example: ACTIVE
+        autoContributeAmount:
+          type: number
+          format: double
+          nullable: true
+          example: 500.00
+        autoContributeFrequency:
+          type: string
+          enum: [WEEKLY, BIWEEKLY, MONTHLY]
+          nullable: true
+          example: MONTHLY
+        nextAutoContribution:
+          type: string
+          format: date
+          nullable: true
+          example: "2026-05-01"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-01-15T08:00:00Z"
+
+    Offer:
+      type: object
+      description: Promotional offer
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "a7b8c9d0-e1f2-3456-abcd-567890123456"
+        title:
+          type: string
+          example: "10% Cashback on Remittance"
+        description:
+          type: string
+          example: "Get 10% cashback on your next international remittance to Philippines"
+        type:
+          type: string
+          enum: [CASHBACK, DISCOUNT, REWARD, PARTNER]
+          example: CASHBACK
+        value:
+          type: number
+          format: double
+          description: Offer value (percentage or fixed amount)
+          example: 10.0
+        valueType:
+          type: string
+          enum: [PERCENTAGE, FIXED]
+          example: PERCENTAGE
+        maxCashback:
+          type: number
+          format: double
+          nullable: true
+          description: Maximum cashback amount in AED
+          example: 100.00
+        partnerName:
+          type: string
+          nullable: true
+          example: "Western Union"
+        imageUrl:
+          type: string
+          format: uri
+          example: "https://cdn.flexpay.ae/offers/cashback-ph.jpg"
+        validFrom:
+          type: string
+          format: date
+          example: "2026-04-01"
+        validTo:
+          type: string
+          format: date
+          example: "2026-04-30"
+        isRedeemed:
+          type: boolean
+          description: Whether the current user has redeemed this offer
+          example: false
+        terms:
+          type: string
+          example: "Valid for remittances to PHP only. Max cashback 100 AED."
+
+    Notification:
+      type: object
+      description: User notification
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "b8c9d0e1-f2a3-4567-bcde-678901234567"
+        type:
+          type: string
+          enum: [TRANSACTION, TRANSFER, REMITTANCE, PAYROLL, LOAN, OFFER, SYSTEM, HAFIZA, SAVINGS]
+          example: TRANSACTION
+        title:
+          type: string
+          example: "Transfer Received"
+        body:
+          type: string
+          example: "You received 150.00 AED from Ahmed Al Mansouri"
+        data:
+          type: object
+          description: Additional metadata (varies by type)
+          additionalProperties: true
+          example:
+            transactionId: "660e8400-e29b-41d4-a716-446655440002"
+            amount: 150.00
+            currency: AED
+        isRead:
+          type: boolean
+          example: false
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-04-26T10:15:00Z"
+
+    AMLAlert:
+      type: object
+      description: Anti-money laundering alert
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "c9d0e1f2-a3b4-5678-cdef-789012345678"
+        userId:
+          type: string
+          format: uuid
+        userName:
+          type: string
+          example: "Unknown User"
+        severity:
+          type: string
+          enum: [LOW, MEDIUM, HIGH, CRITICAL]
+          example: HIGH
+        type:
+          type: string
+          description: Type of AML rule that triggered the alert
+          enum: [LARGE_TRANSACTION, FREQUENT_TRANSFERS, STRUCTURING, SANCTIONS_MATCH, HIGH_RISK_COUNTRY, UNUSUAL_PATTERN]
+          example: LARGE_TRANSACTION
+        description:
+          type: string
+          example: "Multiple large remittance transactions exceeding 25,000 AED within 24 hours"
+        transactionId:
+          type: string
+          format: uuid
+          nullable: true
+        amount:
+          type: number
+          format: double
+          nullable: true
+          example: 50000.00
+        isResolved:
+          type: boolean
+          example: false
+        resolvedBy:
+          type: string
+          format: uuid
+          nullable: true
+        resolvedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-04-26T08:00:00Z"
+
+    Pagination:
+      type: object
+      description: Pagination metadata
+      properties:
+        page:
+          type: integer
+          description: Current page number
+          example: 1
+        limit:
+          type: integer
+          description: Items per page
+          example: 20
+        total:
+          type: integer
+          description: Total number of items
+          example: 156
+        totalPages:
+          type: integer
+          description: Total number of pages
+          example: 8
+        hasNext:
+          type: boolean
+          description: Whether there is a next page
+          example: true
+        hasPrev:
+          type: boolean
+          description: Whether there is a previous page
+          example: false

@@ -1,0 +1,630 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================================================================
+// ENUMS
+// =====================================================================
+
+enum UserRole {
+  EMPLOYEE
+  COMPANY
+  ADMIN
+}
+
+enum EmployeeStatus {
+  PENDING_KYC
+  ACTIVE
+  BLOCKED
+  DEACTIVATED
+}
+
+enum CompanyStatus {
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  TRANSFER
+  RECEIVE
+  CASHBACK
+  FEE
+  REFERRAL_REWARD
+  SAVINGS_TRANSFER
+  CARD_PURCHASE
+  PAYROLL
+  REMITTANCE
+  REFUND
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REVERSED
+}
+
+enum PayrollStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  PARTIAL
+  FAILED
+}
+
+enum CardStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+  EXPIRED
+  REPLACED
+}
+
+enum CardType {
+  VIRTUAL
+  PHYSICAL
+}
+
+enum PlanType {
+  BASIC
+  LUXURY
+}
+
+enum SavingsGoalStatus {
+  ACTIVE
+  COMPLETED
+  PAUSED
+  CANCELLED
+}
+
+enum LoanStatus {
+  PENDING
+  APPROVED
+  ACTIVE
+  REPAID
+  DEFAULTED
+  REJECTED
+}
+
+enum ReferralStatus {
+  PENDING
+  REWARDED
+  EXPIRED
+}
+
+// =====================================================================
+// CORE MODELS
+// =====================================================================
+
+model Employee {
+  id                    String              @id @default(uuid())
+  phone                 String              @unique
+  email                 String?             @unique
+  fullName              String
+  salary                Float?
+
+  walletBalance         Float               @default(0)
+  plan                  PlanType            @default(BASIC)
+
+  status                EmployeeStatus      @default(PENDING_KYC)
+  kycVerifiedAt         DateTime?
+  kycDocuments          Json?
+
+  // NymCard
+  nymcardCustomerId     String?
+
+  // Referrals (canonical relation lives on the Referral model)
+  referralCode          String              @unique @default(cuid())
+
+  creditScore           Int?                @default(50)
+  creditScoreUpdatedAt  DateTime?
+
+  deviceToken           String?
+  notificationsEnabled  Boolean             @default(true)
+
+  companyId             String?
+  company               Company?            @relation(fields: [companyId], references: [id])
+
+  cards                 Card[]
+  transactions          EmployeeTransaction[]
+  savingsGoals          SavingsGoal[]
+  loans                 Loan[]
+  offerClicks           OfferClick[]
+
+  // WPS Routing plane back-references
+  payrollIntents        PayrollIntent[]
+  advances              Advance[]
+  ledgerEntries         LedgerEntry[]
+
+  // Mobile API gateway — multi-device binding
+  devices               Device[]
+
+  // Inverse sides of the Referral relation
+  referralsMade         Referral[]          @relation("ReferralsMade")
+  referralReceived      Referral?           @relation("ReferralsReceived")
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  lastLoginAt           DateTime?
+
+  @@index([phone])
+  @@index([companyId])
+  @@index([status])
+  @@index([referralCode])
+  @@map("employees")
+}
+
+model Company {
+  id                    String              @id @default(uuid())
+  name                  String
+  tradeLicense          String              @unique
+  adminName             String
+  adminEmail            String              @unique
+  adminPhone            String              @unique
+  passwordHash          String
+
+  balance               Float               @default(0)
+  currency              String              @default("AED")
+  status                CompanyStatus       @default(ACTIVE)
+
+  payrollDay            Int?
+  autoPayrollEnabled    Boolean             @default(false)
+
+  employees             Employee[]
+  scheduledPayrolls     ScheduledPayroll[]
+  payrollCycles         PayrollCycle[]
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@index([adminEmail])
+  @@index([tradeLicense])
+  @@map("companies")
+}
+
+model Card {
+  id                    String              @id @default(uuid())
+  cardId                String              @unique  // NymCard external ID
+  customerId            String              // NymCard customer ID
+
+  type                  CardType
+  status                CardStatus          @default(ACTIVE)
+
+  last4                 String              @db.Char(4)
+  brand                 String              @default("VISA")
+  expiryMonth           Int
+  expiryYear            Int
+
+  dailyLimit            Float               @default(5000)
+  monthlyLimit          Float               @default(50000)
+  spentToday            Float               @default(0)
+  spentThisMonth        Float               @default(0)
+
+  shippingAddress       Json?
+  trackingNumber        String?
+  shippingStatus        String?
+
+  applePayToken         String?
+  googlePayToken        String?
+
+  employeeId            String
+  employee              Employee            @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  transactions          EmployeeTransaction[]
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@unique([employeeId, type])
+  @@index([customerId])
+  @@index([employeeId])
+  @@index([status])
+  @@map("cards")
+}
+
+model EmployeeTransaction {
+  id                    String              @id @default(uuid())
+
+  employeeId            String
+  employee              Employee            @relation(fields: [employeeId], references: [id])
+
+  type                  TransactionType
+  amount                Float
+  fee                   Float               @default(0)
+  totalAmount           Float
+  currency              String              @default("AED")
+
+  status                TransactionStatus   @default(COMPLETED)
+
+  description           String?
+  reference             String?
+  merchantName          String?
+  merchantCategory      String?
+  location              Json?
+
+  counterpartyId        String?
+  counterpartyPhone     String?
+
+  cardId                String?
+  card                  Card?               @relation(fields: [cardId], references: [id])
+
+  payrollId             String?
+
+  idempotencyKey        String?             @unique
+
+  createdAt             DateTime            @default(now())
+  processedAt           DateTime?
+
+  @@index([employeeId, createdAt])
+  @@index([employeeId, type, status])
+  @@index([reference])
+  @@index([idempotencyKey])
+  @@map("employee_transactions")
+}
+
+model ScheduledPayroll {
+  id                    String              @id @default(uuid())
+
+  companyId             String
+  company               Company             @relation(fields: [companyId], references: [id])
+
+  // Materialised list of recipients. We avoid an implicit M2M relation here
+  // because payroll runs are immutable snapshots — they should not move with
+  // employee changes after scheduling.
+  employeeIds           String[]
+  amountPerEmployee     Json?
+
+  totalAmount           Float
+
+  scheduledDate         DateTime
+  processedAt           DateTime?
+
+  status                PayrollStatus       @default(PENDING)
+  failureReason         String?
+
+  createdBy             String
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@index([companyId, scheduledDate])
+  @@index([status])
+  @@map("scheduled_payrolls")
+}
+
+model SavingsGoal {
+  id                    String              @id @default(uuid())
+
+  employeeId            String
+  employee              Employee            @relation(fields: [employeeId], references: [id])
+
+  name                  String              @db.VarChar(100)
+  targetAmount          Float
+  savedAmount           Float               @default(0)
+
+  monthlyAuto           Float?
+  autoSaveDay           Int?
+
+  deadline              DateTime?
+  status                SavingsGoalStatus   @default(ACTIVE)
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@index([employeeId, status])
+  @@map("savings_goals")
+}
+
+model Loan {
+  id                    String              @id @default(uuid())
+
+  employeeId            String
+  employee              Employee            @relation(fields: [employeeId], references: [id])
+
+  type                  String
+  principal             Float
+  interestRate          Float               @default(0)
+  termDays              Int
+
+  status                LoanStatus          @default(PENDING)
+  approvedBy            String?
+  approvedAt            DateTime?
+
+  disbursedAmount       Float?
+  disbursedAt           DateTime?
+  disbursementTxnId     String?
+
+  repaidAmount          Float               @default(0)
+  nextDueDate           DateTime?
+  nextDueAmount         Float?
+  finalDueDate          DateTime?
+
+  partnerReference      String?
+  partnerData           Json?
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@index([employeeId, status])
+  @@index([partnerReference])
+  @@map("loans")
+}
+
+model Referral {
+  id                       String           @id @default(uuid())
+
+  referrerId               String
+  referrer                 Employee         @relation("ReferralsMade", fields: [referrerId], references: [id])
+
+  refereeId                String           @unique
+  referee                  Employee         @relation("ReferralsReceived", fields: [refereeId], references: [id])
+
+  status                   ReferralStatus   @default(PENDING)
+  rewardGiven              Boolean          @default(false)
+  rewardAmount             Float            @default(10)
+
+  refereeFirstDepositAt    DateTime?
+  refereeFirstDepositAmount Float?
+
+  createdAt                DateTime         @default(now())
+  rewardedAt               DateTime?
+
+  @@index([referrerId])
+  @@index([refereeId])
+  @@index([status])
+  @@map("referrals")
+}
+
+model Offer {
+  id                    String              @id @default(uuid())
+
+  title                 String
+  description           String?             @db.Text
+  discountPercentage    Int
+
+  merchant              String
+  affiliateLink         String              @db.Text
+  imageUrl              String?
+  terms                 String?             @db.Text
+
+  planRequired          PlanType?
+  minSalary             Float?
+
+  expiresAt             DateTime
+  isActive              Boolean             @default(true)
+
+  clicks                Int                 @default(0)
+  conversions           Int                 @default(0)
+
+  offerClicks           OfferClick[]
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@index([merchant, isActive])
+  @@index([expiresAt])
+  @@map("offers")
+}
+
+model OfferClick {
+  id                    String              @id @default(uuid())
+
+  offerId               String
+  offer                 Offer               @relation(fields: [offerId], references: [id])
+
+  employeeId            String
+  employee              Employee            @relation(fields: [employeeId], references: [id])
+
+  clickedAt             DateTime            @default(now())
+  ipAddress             String?
+  userAgent             String?
+
+  converted             Boolean             @default(false)
+  conversionValue       Float?
+
+  @@index([offerId, clickedAt])
+  @@index([employeeId])
+  @@map("offer_clicks")
+}
+
+model AuditLog {
+  id                    String              @id @default(uuid())
+
+  actorType             String
+  actorId               String?
+  action                String
+  resourceType          String?
+  resourceId            String?
+
+  metadata              Json?
+  ipAddress             String?
+  userAgent             String?
+
+  createdAt             DateTime            @default(now())
+
+  @@index([actorType, actorId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
+
+// =====================================================================
+// WPS Routing Plane
+//
+// These tables back the moat described in docs/STRATEGY.md §3.2:
+//   1. PayrollCycle      — the company × period unit of work
+//   2. PayrollIntent     — per-employee derived row from the WPS file;
+//                          accruedAmount comes from HR-tech attendance
+//   3. Advance           — EWA request bound to a cycle
+//   4. LedgerEntry       — append-only, signed-delta ledger that's the
+//                          source of truth for the reconciliation worker
+//
+// Invariants enforced in code (src/modules/payroll-routing/):
+//   I1  advance.amount     <= intent.accruedAmount
+//   I2  advance.cycleId    == intent.cycleId
+//   I3  Σ LedgerEntry.delta per (employee, cycle) == 0 post-settle
+// =====================================================================
+
+enum PayrollCycleStatus {
+  OPEN            // Company created the cycle, no file yet
+  INGESTING       // WPS file received, parsing in progress
+  INTENTS_READY   // PayrollIntents materialised, awaiting settlement
+  SETTLED         // All intents routed
+  FAILED          // Drift detected or routing aborted
+}
+
+enum PayrollIntentStatus {
+  PENDING
+  ROUTED
+  FAILED
+}
+
+enum AdvanceStatus {
+  REQUESTED       // User asked for it
+  APPROVED        // DCSE green-lit it
+  RESERVED        // Wallet credited; ledger reserve entry written
+  SETTLED         // Deducted from PayrollIntent on cycle close
+  REJECTED        // DCSE / failsafe denied
+  FAILED          // Settlement attempted and broke an invariant
+}
+
+enum LedgerEntryType {
+  ADVANCE_RESERVE     // wallet+ when advance is approved & reserved
+  ADVANCE_SETTLE      // intent- when payroll cycle settles the advance
+  PAYROLL_RESIDUAL    // wallet+ residual (gross - settled advances)
+  PAYROLL_FULL        // wallet+ full salary (no advance to settle)
+  RECONCILIATION_ADJ  // ops-issued manual adjustment (audit-logged)
+}
+
+model PayrollCycle {
+  id              String              @id @default(uuid())
+  companyId       String
+  periodStart     DateTime
+  periodEnd       DateTime
+  fileFingerprint String?             @unique  // sha256 of source WPS file
+  fileFormat      String?             // UAE_MT940 | UAE_SIF | UAE_CSV | KSA_MUDAD
+  status          PayrollCycleStatus  @default(OPEN)
+  failureReason   String?
+  ingestedAt      DateTime?
+  settledAt       DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  company         Company             @relation(fields: [companyId], references: [id])
+  intents         PayrollIntent[]
+  advances        Advance[]
+  ledgerEntries   LedgerEntry[]
+
+  @@unique([companyId, periodStart, periodEnd])
+  @@index([status, settledAt])
+  @@map("payroll_cycles")
+}
+
+model PayrollIntent {
+  id              String               @id @default(uuid())
+  cycleId         String
+  employeeId      String
+  grossAmount     Float                // What the employer is paying this cycle
+  accruedAmount   Float                // What HR-tech attendance confirms is earned today
+  currency        String               @default("AED")
+  status          PayrollIntentStatus  @default(PENDING)
+  fileLineHash    String               // sha256(line) — traceability to source file row
+  routedAt        DateTime?
+  createdAt       DateTime             @default(now())
+
+  cycle           PayrollCycle         @relation(fields: [cycleId], references: [id])
+  employee        Employee             @relation(fields: [employeeId], references: [id])
+  ledgerEntries   LedgerEntry[]
+
+  @@unique([cycleId, employeeId])
+  @@index([status])
+  @@map("payroll_intents")
+}
+
+model Advance {
+  id              String         @id @default(uuid())
+  employeeId      String
+  cycleId         String
+  amount          Float          // Net to user
+  fee             Float          @default(0)  // Fixed processing fee (regulator-aligned, not interest)
+  currency        String         @default("AED")
+  status          AdvanceStatus  @default(REQUESTED)
+  failureReason   String?
+  requestedAt     DateTime       @default(now())
+  approvedAt      DateTime?
+  reservedAt      DateTime?
+  settledAt       DateTime?
+
+  // Snapshot of the DCSE decision at request time. Immutable; do NOT
+  // re-read scoring at settlement time (the model may have shifted).
+  dcseModelVersion String?
+  dcseLimitAtReq   Float?
+  dcseRiskScoreAtReq Float?
+
+  employee        Employee       @relation(fields: [employeeId], references: [id])
+  cycle           PayrollCycle   @relation(fields: [cycleId], references: [id])
+  ledgerEntries   LedgerEntry[]
+
+  @@index([employeeId, status])
+  @@index([cycleId, status])
+  @@map("advances")
+}
+
+model LedgerEntry {
+  id              String           @id @default(uuid())
+  type            LedgerEntryType
+  employeeId      String
+  cycleId         String?
+  intentId        String?
+  advanceId       String?
+  delta           Float            // Signed
+  currency        String           @default("AED")
+  description     String?
+  createdAt       DateTime         @default(now())
+
+  employee        Employee         @relation(fields: [employeeId], references: [id])
+  cycle           PayrollCycle?    @relation(fields: [cycleId], references: [id])
+  intent          PayrollIntent?   @relation(fields: [intentId], references: [id])
+  advance         Advance?         @relation(fields: [advanceId], references: [id])
+
+  @@index([cycleId])
+  @@index([employeeId, createdAt(sort: Desc)])
+  @@map("ledger_entries")
+}
+
+// =====================================================================
+// Mobile API Gateway — Device Binding
+//
+// Trust-on-first-use device registration backed by a strong fingerprint
+// (mobile-derived hash of device id + secure-enclave-bound install
+// secret + platform + app version). The middleware in
+// src/modules/mobile-api/device-binding.ts auto-registers on first
+// authenticated request and rejects any later request from a different
+// fingerprint unless the prior device is explicitly revoked.
+// =====================================================================
+
+model Device {
+  id              String    @id @default(uuid())
+  employeeId      String
+  fingerprint     String    // sha256(deviceId + installSecret + platform)
+  platform        String    // ios | android
+  appVersion      String
+  fcmToken        String?   // Per-device push token (distinct from Employee.deviceToken)
+  registeredAt    DateTime  @default(now())
+  lastSeenAt      DateTime  @default(now())
+  revoked         Boolean   @default(false)
+  revokedAt       DateTime?
+  revokedReason   String?
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeId, fingerprint])
+  @@index([employeeId, revoked])
+  @@map("devices")
+}

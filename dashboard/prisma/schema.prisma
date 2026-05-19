@@ -1,0 +1,690 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== USER & AUTH ====================
+
+model User {
+  id          String   @id @default(cuid())
+  phone       String   @unique
+  fullName    String
+  email       String?  @unique
+  role        String   @default("EMPLOYEE") // EMPLOYEE | COMPANY
+  kycLevel    Int      @default(0)          // 0=none, 1=basic, 2=enhanced
+  avatarUrl   String?
+  nymcardCustId String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Existing relations
+  wallet         Wallet?
+  beneficiaries  Beneficiary[]
+  transactions   Transaction[]
+  cards          Card[]
+  hafizaMembers  HafizaMember[]
+  loyaltyPoints  LoyaltyPoints[]
+  amlAlerts      AMLAlert[]
+  auditLogs      AuditLog[]
+  sentTransfers  P2PTransfer[] @relation("SenderTransfers")
+  receivedTransfers P2PTransfer[] @relation("ReceiverTransfers")
+  creditScores   CreditScore[]
+
+  // New relations — Payroll & Employment
+  employees          Employee[]
+  company            Company?
+  companyEmployees   Employee[]          @relation("CompanyEmployees")
+  employeePayrolls   Payroll[]           @relation("EmployeePayroll")
+  companyPayrolls    Payroll[]           @relation("CompanyPayroll")
+  scheduledPayrolls  ScheduledPayroll[]  @relation("CompanyScheduledPayroll")
+
+  // New relations — Savings Goals
+  savingsGoals            SavingsGoal[]
+  savingsContributions    SavingsContribution[]
+
+  // New relations — Loans
+  loans             Loan[]
+  loanRepayments    LoanRepayment[]
+
+  // New relations — Referrals
+  referralCode      Referral[] @relation("Referrer")
+  referralReceived  Referral[] @relation("Referred")
+
+  // New relations — Offers
+  offerClicks       OfferClick[]
+
+  // New relations — Notifications
+  notifications     Notification[]
+
+  // New relations — Cashback
+  cashbackTransactions CashbackTransaction[]
+}
+
+// ==================== WALLET ====================
+
+model Wallet {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balances Balance[]
+}
+
+model Balance {
+  id        String   @id @default(cuid())
+  walletId  String
+  currency  String   // AED | INR | PHP | PKR | USD
+  amount    Float    @default(0)
+  updatedAt DateTime @updatedAt
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@unique([walletId, currency])
+}
+
+// ==================== TRANSACTIONS ====================
+
+model Transaction {
+  id              String   @id @default(cuid())
+  userId          String
+  type            String   // SALARY_CREDIT | SPEND | TOP_UP | WITHDRAW | REMITTANCE | P2P_SEND | P2P_RECEIVE | REFUND
+  status          String   @default("PENDING") // PENDING | COMPLETED | FAILED | CANCELLED
+  amount          Float
+  currency        String   @default("AED")
+  fee             Float    @default(0)
+  description     String?
+  reference       String?  @unique
+  metadata        String?  // JSON string for extra data
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user                  User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  payrollRecords        Payroll[]            @relation("PayrollTransaction")
+  savingsContributions  SavingsContribution[] @relation("SavingsContributionTransaction")
+  loanRepayments        LoanRepayment[]      @relation("LoanRepaymentTransaction")
+  cashbackTransactions  CashbackTransaction[]
+
+  @@index([userId])
+  @@index([type])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ==================== P2P TRANSFER ====================
+
+model P2PTransfer {
+  id            String   @id @default(cuid())
+  senderId      String
+  receiverId    String
+  amount        Float
+  currency      String   @default("AED")
+  note          String?
+  status        String   @default("PENDING") // PENDING | COMPLETED | FAILED
+  createdAt     DateTime @default(now())
+
+  sender   User @relation("SenderTransfers", fields: [senderId], references: [id])
+  receiver User @relation("ReceiverTransfers", fields: [receiverId], references: [id])
+}
+
+// ==================== BENEFICIARY ====================
+
+model Beneficiary {
+  id            String   @id @default(cuid())
+  userId        String
+  fullName      String
+  country       String
+  bankName      String?
+  accountNumber String
+  ifscCode      String?  // For India
+  iban          String?  // For other countries
+  swiftCode     String?
+  isVerified    Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ==================== CARDS ====================
+
+model Card {
+  id            String   @id @default(cuid())
+  userId        String
+  type          String   @default("VIRTUAL") // VIRTUAL | PHYSICAL
+  status        String   @default("ACTIVE")  // ACTIVE | FROZEN | BLOCKED | EXPIRED
+  last4Digits   String
+  expiryMonth   Int
+  expiryYear    Int
+  cardholderName String
+  dailyLimit    Float    @default(5000)
+  monthlyLimit  Float    @default(50000)
+  spentToday    Float    @default(0)
+  spentMonth    Float    @default(0)
+  isApplePay    Boolean  @default(false)
+  isGooglePay   Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ==================== HAFIZA (SOCIAL SAVINGS) ====================
+
+model HafizaCircle {
+  id              String   @id @default(cuid())
+  name            String
+  description     String?
+  monthlyAmount   Float
+  totalMembers    Int
+  currentTurn     Int      @default(0)
+  status          String   @default("ACTIVE") // ACTIVE | COMPLETED | DISSOLVED
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  members HafizaMember[]
+}
+
+model HafizaMember {
+  id          String   @id @default(cuid())
+  circleId    String
+  userId      String
+  turnOrder   Int
+  trustScore  Float    @default(50)
+  hasPaid     Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  circle HafizaCircle @relation(fields: [circleId], references: [id], onDelete: Cascade)
+  user   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([circleId, userId])
+}
+
+// ==================== CREDIT SCORE ====================
+
+model CreditScore {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  score         Int      @default(50)  // 0-100
+  factors       String?  // JSON: transaction frequency, repayment history, telecom data
+  lastEvaluated DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ==================== LOYALTY ====================
+
+model LoyaltyPoints {
+  id          String   @id @default(cuid())
+  userId      String
+  points      Int      @default(0)
+  tier        String   @default("BRONZE") // BRONZE | SILVER | GOLD | PLATINUM
+  badges      String?  // JSON array of earned badges
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ==================== AML COMPLIANCE ====================
+
+model AMLAlert {
+  id              String   @id @default(cuid())
+  userId          String?
+  transactionId   String?
+  type            String   // STRUCTURED | VELOCITY | RAPID_MOVEMENT | LATE_NIGHT | MULTI_BENEFICIARY | LARGE_AMOUNT | HIGH_RISK_COUNTRY
+  severity        String   // LOW | MEDIUM | HIGH | CRITICAL
+  description     String
+  isResolved      Boolean  @default(false)
+  resolvedBy      String?
+  resolvedAt      DateTime?
+  createdAt       DateTime @default(now())
+
+  user        User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+// ==================== AUDIT LOG ====================
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  resource  String
+  details   String?  // JSON
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// NEW MODELS — Task t1: Extended Schema (12 additional models)
+// ============================================================================
+
+// ==================== COMPANY (Employer Profile) ====================
+
+model Company {
+  id                 String    @id @default(cuid())
+  userId             String    @unique
+  tradeLicense       String    @unique
+  companyName        String
+  companyType        String    // FREEZONE | MAINLAND | OFFSHORE
+  industry           String
+  address            String?
+  city               String    @default("Dubai")
+  country            String    @default("UAE")
+  employeeCount      Int       @default(0)
+  isVerified         Boolean   @default(false)
+  verifiedAt         DateTime?
+  subscriptionPlan   String    // STARTER | GROWTH | ENTERPRISE
+  subscriptionExpiry DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Access company employees via: company.user.companyEmployees
+
+  @@index([userId])
+  @@index([tradeLicense])
+  @@index([isVerified])
+}
+
+// ==================== EMPLOYEE (Employee Profile) ====================
+// Note: Payroll/Loan/SavingsGoal/Referral FKs point to User (not Employee),
+// so those relations live on User. Access via employee.user.payrollRecords etc.
+
+model Employee {
+  id               String    @id @default(cuid())
+  userId           String    @unique
+  companyUserId    String
+  employeeId       String    @unique   // Company-assigned, e.g. "EMP-0042"
+  department       String              // ENGINEERING | HR | FINANCE | OPERATIONS | SALES | LOGISTICS | OTHER
+  position         String              // Job title
+  baseSalary       Float               // Monthly in AED
+  salaryCurrency   String    @default("AED")
+  employmentStatus String    @default("PROBATION") // ACTIVE | ON_LEAVE | TERMINATED | PROBATION
+  startDate        DateTime
+  endDate          DateTime?
+  bankAccountIban  String?
+  bankAccountName  String?
+  emiratesId       String?
+  passportNumber   String?
+  visaExpiryDate   DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  user    User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company User @relation("CompanyEmployees", fields: [companyUserId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([companyUserId])
+  @@index([employeeId])
+  @@index([employmentStatus])
+}
+
+// ==================== PAYROLL (Individual Payroll Run Record) ====================
+
+model Payroll {
+  id              String    @id @default(cuid())
+  companyUserId   String
+  batchId         String
+  employeeUserId  String
+  grossAmount     Float
+  deductions      Float     @default(0)
+  netAmount       Float
+  currency        String    @default("AED")
+  payPeriodStart  DateTime
+  payPeriodEnd    DateTime
+  status          String    @default("PENDING") // PENDING | PROCESSING | COMPLETED | FAILED | CANCELLED
+  processedAt     DateTime?
+  failureReason   String?
+  transactionId   String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  company    User         @relation("CompanyPayroll", fields: [companyUserId], references: [id], onDelete: Cascade)
+  employee   User         @relation("EmployeePayroll", fields: [employeeUserId], references: [id], onDelete: Cascade)
+  transaction Transaction? @relation("PayrollTransaction", fields: [transactionId], references: [id], onDelete: SetNull)
+
+  @@index([companyUserId])
+  @@index([employeeUserId])
+  @@index([batchId])
+  @@index([status])
+  @@index([payPeriodEnd])
+}
+
+// ==================== SCHEDULED PAYROLL (Auto-payroll Configuration) ====================
+
+model ScheduledPayroll {
+  id              String    @id @default(cuid())
+  companyUserId   String
+  name            String    // e.g. "Monthly Salary"
+  frequency       String    // MONTHLY | BIWEEKLY | WEEKLY
+  payDay          Int       // Day of month (monthly) or day of week 1-7
+  isActive        Boolean   @default(true)
+  lastRunAt       DateTime?
+  nextRunAt       DateTime
+  totalEmployees  Int       @default(0)
+  totalAmount     Float     @default(0)
+  currency        String    @default("AED")
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  company User @relation("CompanyScheduledPayroll", fields: [companyUserId], references: [id], onDelete: Cascade)
+
+  @@index([companyUserId])
+  @@index([isActive])
+  @@index([nextRunAt])
+}
+
+// ==================== SAVINGS GOAL ====================
+
+model SavingsGoal {
+  id                    String    @id @default(cuid())
+  userId                String
+  name                  String    // e.g. "Emergency Fund"
+  targetAmount          Float
+  currentAmount         Float     @default(0)
+  currency              String    @default("AED")
+  category              String    // EMERGENCY | EDUCATION | HEALTH | TRAVEL | INVESTMENT | CUSTOM
+  status                String    @default("ACTIVE") // ACTIVE | COMPLETED | PAUSED | CANCELLED
+  autoContributeAmount  Float?
+  autoContributeFrequency String? // DAILY | WEEKLY | MONTHLY
+  targetDate            DateTime?
+  completedAt           DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contributions SavingsContribution[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([category])
+}
+
+// ==================== SAVINGS CONTRIBUTION ====================
+
+model SavingsContribution {
+  id             String   @id @default(cuid())
+  savingsGoalId  String
+  userId         String
+  amount         Float
+  currency       String   @default("AED")
+  transactionId  String?
+  source         String   // MANUAL | AUTO | HAFIZA | ROUND_UP
+  createdAt      DateTime @default(now())
+
+  savingsGoal SavingsGoal   @relation(fields: [savingsGoalId], references: [id], onDelete: Cascade)
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transaction  Transaction?  @relation("SavingsContributionTransaction", fields: [transactionId], references: [id], onDelete: SetNull)
+
+  @@index([savingsGoalId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// ==================== REFERRAL ====================
+
+model Referral {
+  id             String    @id @default(cuid())
+  referrerUserId String
+  referredUserId String
+  referralCode   String    @unique   // 8-char code
+  status         String    @default("PENDING") // PENDING | COMPLETED | EXPIRED | REWARDED
+  rewardType     String    // POINTS | CASHBACK | FREE_TRANSFER
+  rewardAmount   Float     @default(0)
+  rewardedAt     DateTime?
+  expiresAt      DateTime
+  createdAt      DateTime  @default(now())
+
+  referrer User @relation("Referrer", fields: [referrerUserId], references: [id], onDelete: Cascade)
+  referred User @relation("Referred", fields: [referredUserId], references: [id], onDelete: Cascade)
+
+  @@index([referrerUserId])
+  @@index([referredUserId])
+  @@index([referralCode])
+  @@index([status])
+  @@unique([referrerUserId, referredUserId])
+}
+
+// ==================== LOAN (Micro-loan Management) ====================
+
+model Loan {
+  id                 String    @id @default(cuid())
+  userId             String
+  amount             Float
+  currency           String    @default("AED")
+  interestRate       Float     // Annual percentage
+  termMonths         Int
+  monthlyPayment     Float
+  outstandingBalance Float
+  status             String    @default("PENDING") // PENDING | APPROVED | DISBURSED | REPAYING | COMPLETED | DEFAULTED | REJECTED
+  purpose            String    // RENT | EDUCATION | MEDICAL | EMERGENCY | DEBT_CONSOLIDATION | OTHER
+  appliedAt          DateTime  @default(now())
+  approvedAt         DateTime?
+  disbursedAt        DateTime?
+  completedAt        DateTime?
+  dueDate            DateTime?
+  nextPaymentDate    DateTime?
+  missedPayments     Int       @default(0)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  repayments LoanRepayment[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([nextPaymentDate])
+  @@index([dueDate])
+}
+
+// ==================== LOAN REPAYMENT ====================
+
+model LoanRepayment {
+  id             String   @id @default(cuid())
+  loanId         String
+  userId         String
+  amount         Float
+  currency       String   @default("AED")
+  principalAmount Float
+  interestAmount Float
+  paymentDate    DateTime @default(now())
+  status         String   @default("COMPLETED") // COMPLETED | FAILED | PENDING
+  transactionId  String?
+  createdAt      DateTime @default(now())
+
+  loan        Loan         @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transaction  Transaction? @relation("LoanRepaymentTransaction", fields: [transactionId], references: [id], onDelete: SetNull)
+
+  @@index([loanId])
+  @@index([userId])
+  @@index([paymentDate])
+}
+
+// ==================== OFFER (Promotional Offers) ====================
+
+model Offer {
+  id                   String    @id @default(cuid())
+  title                String
+  description          String
+  offerType            String    // REMITTANCE_FEE_WAIVER | CASHBACK | BONUS_POINTS | REFER_BONUS | SIGNUP_BONUS | CARD_FEE_WAIVER
+  discountValue        Float
+  discountType         String    // PERCENTAGE | FIXED
+  minTransactionAmount Float     @default(0)
+  maxDiscountAmount    Float?
+  validFrom            DateTime
+  validUntil           DateTime
+  maxRedemptions       Int?
+  totalRedemptions     Int       @default(0)
+  isActive             Boolean   @default(true)
+  terms                String?
+  imageUrl             String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  clicks OfferClick[]
+
+  @@index([offerType])
+  @@index([isActive])
+  @@index([validFrom])
+  @@index([validUntil])
+}
+
+// ==================== OFFER CLICK (Offer Click/Impression Tracking) ====================
+
+model OfferClick {
+  id        String   @id @default(cuid())
+  offerId   String
+  userId    String
+  action    String   // VIEWED | CLICKED | REDEEMED
+  createdAt DateTime @default(now())
+
+  offer Offer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([offerId])
+  @@index([userId])
+  @@index([action])
+}
+
+// ==================== NOTIFICATION (Push/Notification System) ====================
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  type      String    // TRANSACTION | PAYROLL | PROMOTION | SECURITY | SYSTEM | REMINDER | LOAN | SAVINGS
+  title     String
+  body      String
+  data      String?   // JSON for deep link
+  isRead    Boolean   @default(false)
+  readAt    DateTime?
+  channel   String    // PUSH | IN_APP | EMAIL | SMS
+  priority  String    // LOW | MEDIUM | HIGH | URGENT
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([type])
+  @@index([isRead])
+  @@index([createdAt])
+  @@index([priority])
+}
+
+// ==================== EXCHANGE RATE ====================
+
+model ExchangeRate {
+  id           String   @id @default(cuid())
+  fromCurrency String   // Typically AED
+  toCurrency   String   // INR, PHP, PKR, USD, etc.
+  rate         Float
+  source       String   @default("CBUAE") // CBUAE | ECB | REUTERS
+  isValid      Boolean  @default(true)
+  fetchedAt    DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([fromCurrency, toCurrency])
+  @@index([isValid])
+}
+
+// ==================== CASHBACK RULE ====================
+
+model CashbackRule {
+  id                 String   @id @default(cuid())
+  name               String
+  txType             String   // Which transaction types earn cashback
+  category           String?  // e.g. "GROCERY", "TRANSPORT" — null = all
+  rate               Float    // e.g. 0.025 = 2.5%
+  maxCashbackPerTx   Float
+  maxCashbackPerMonth Float
+  minTransaction     Float    @default(0)
+  isActive           Boolean  @default(true)
+  validFrom          DateTime
+  validUntil         DateTime
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  transactions CashbackTransaction[]
+
+  @@index([isActive])
+  @@index([txType])
+}
+
+// ==================== CASHBACK TRANSACTION ====================
+
+model CashbackTransaction {
+  id             String   @id @default(cuid())
+  userId         String
+  transactionId  String
+  cashbackRuleId String
+  amount         Float
+  currency       String   @default("AED")
+  createdAt      DateTime @default(now())
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transaction  Transaction   @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  cashbackRule CashbackRule  @relation(fields: [cashbackRuleId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([transactionId])
+  @@index([cashbackRuleId])
+}
+
+// ==================== WEBHOOK CONFIG ====================
+
+model WebhookConfig {
+  id          String   @id @default(cuid())
+  url         String
+  secret      String   // HMAC-SHA256 signing secret
+  events      String   // JSON array of subscribed event types
+  isActive    Boolean  @default(true)
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  deliveries WebhookDelivery[]
+
+  @@index([isActive])
+}
+
+// ==================== WEBHOOK DELIVERY ====================
+
+model WebhookDelivery {
+  id             String   @id @default(cuid())
+  webhookConfigId String
+  eventType      String
+  payload        String   // JSON
+  statusCode     Int?
+  response       String?
+  attempt        Int      @default(1)
+  maxAttempts    Int      @default(5)
+  nextRetryAt    DateTime?
+  status         String   @default("PENDING") // PENDING | SUCCESS | FAILED | EXHAUSTED
+  deliveredAt    DateTime?
+  createdAt      DateTime @default(now())
+
+  webhookConfig WebhookConfig @relation(fields: [webhookConfigId], references: [id], onDelete: Cascade)
+
+  @@index([webhookConfigId])
+  @@index([eventType])
+  @@index([status])
+  @@index([nextRetryAt])
+}
