@@ -1,13 +1,16 @@
 /** @type {import('jest').Config} */
 module.exports = {
   preset: 'react-native',
-  // Native module mocks + jest-native matcher registration.
-  setupFiles: ['<rootDir>/__tests__/setup.ts'],
+  // Native module mocks + jest-native matcher registration. Must be
+  // setupFilesAfterEnv because @testing-library/jest-native/extend-expect
+  // reaches for the global `expect`, which only exists after the test
+  // framework has been installed in the environment.
+  setupFilesAfterEnv: ['<rootDir>/__tests__/setup.ts'],
   roots: ['<rootDir>/__tests__/unit'],
   testMatch: ['**/__tests__/unit/**/*.test.(ts|tsx)'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
   transformIgnorePatterns: [
-    'node_modules/(?!(react-native|@react-native|@react-navigation|react-native-.*|@notifee|@sentry|@testing-library)/)',
+    'node_modules/(?!(react-native|@react-native|@react-navigation|react-native-.*|@notifee|@sentry|@testing-library|immer|zustand|uuid)/)',
   ],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
