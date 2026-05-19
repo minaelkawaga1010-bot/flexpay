@@ -144,6 +144,9 @@ model Employee {
   advances              Advance[]
   ledgerEntries         LedgerEntry[]
 
+  // Mobile API gateway — multi-device binding
+  devices               Device[]
+
   // Inverse sides of the Referral relation
   referralsMade         Referral[]          @relation("ReferralsMade")
   referralReceived      Referral?           @relation("ReferralsReceived")
@@ -593,4 +596,35 @@ model LedgerEntry {
   @@index([cycleId])
   @@index([employeeId, createdAt(sort: Desc)])
   @@map("ledger_entries")
+}
+
+// =====================================================================
+// Mobile API Gateway — Device Binding
+//
+// Trust-on-first-use device registration backed by a strong fingerprint
+// (mobile-derived hash of device id + secure-enclave-bound install
+// secret + platform + app version). The middleware in
+// src/modules/mobile-api/device-binding.ts auto-registers on first
+// authenticated request and rejects any later request from a different
+// fingerprint unless the prior device is explicitly revoked.
+// =====================================================================
+
+model Device {
+  id              String    @id @default(uuid())
+  employeeId      String
+  fingerprint     String    // sha256(deviceId + installSecret + platform)
+  platform        String    // ios | android
+  appVersion      String
+  fcmToken        String?   // Per-device push token (distinct from Employee.deviceToken)
+  registeredAt    DateTime  @default(now())
+  lastSeenAt      DateTime  @default(now())
+  revoked         Boolean   @default(false)
+  revokedAt       DateTime?
+  revokedReason   String?
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeId, fingerprint])
+  @@index([employeeId, revoked])
+  @@map("devices")
 }

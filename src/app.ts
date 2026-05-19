@@ -23,6 +23,7 @@ import { ewaController } from '@modules/ewa/ewa.controller';
 import { remittanceController } from '@modules/remittance/remittance.controller';
 import { referralsController } from '@modules/referrals/referrals.controller';
 import { notificationsController } from '@modules/notifications/notification.controller';
+import { mobileWalletController } from '@modules/mobile-api/wallet.controller';
 
 // Webhooks
 import { nymcardWebhook } from '@webhooks/nymcard.webhook';
@@ -103,6 +104,11 @@ app.use(`${env.API_PREFIX}/ewa`, ewaController.router);
 app.use(`${env.API_PREFIX}/remittance`, remittanceController.router);
 app.use(`${env.API_PREFIX}/referrals`, referralsController.router);
 app.use(`${env.API_PREFIX}/notifications`, notificationsController.router);
+// Mobile API gateway — device-bound, biometric-attested, step-up-OTP-
+// gated wallet surface. See src/modules/mobile-api/ for the security
+// stack. The legacy /wallet/* surface remains for service-to-service
+// callers; mobile clients target /mobile/wallet/* exclusively.
+app.use(`${env.API_PREFIX}/mobile/wallet`, mobileWalletController.router);
 
 // =====================================================================
 // 404 + error handlers (last)
