@@ -116,7 +116,6 @@ model Employee {
 
   status                EmployeeStatus      @default(PENDING_KYC)
   kycVerifiedAt         DateTime?
-  kycDocuments          Json?
 
   // NymCard
   nymcardCustomerId     String?
@@ -146,6 +145,10 @@ model Employee {
 
   // Mobile API gateway — multi-device binding
   devices               Device[]
+
+  // Compliance plane back-references
+  kycDocuments          KycDocument[]
+  complianceIncidents   ComplianceIncident[]
 
   // Inverse sides of the Referral relation
   referralsMade         Referral[]          @relation("ReferralsMade")
@@ -627,4 +630,178 @@ model Device {
   @@unique([employeeId, fingerprint])
   @@index([employeeId, revoked])
   @@map("devices")
+}
+
+// =====================================================================
+// Compliance Plane — KYC + AML
+//
+// Implements the compliance surface described in STRATEGY.md §5 and
+// §15. Three concerns:
+//
+//   1. KYC documents — Emirates ID + selfie + supporting docs.
+//      Extracted fields are persisted in a structured way so re-OCR is
+//      never needed, and the source image hash is stored for non-
+//      repudiation (the image itself sits in S3/equivalent).
+//
+//   2. Compliance incidents — every AML / sanctions hit, KYC rejection,
+//      or other policy event is an append-only ComplianceIncident row.
+//      Resolution is itself another row (no UPDATE on the original).
+//
+//   3. Sanctions list snapshots — local mirrors of UN/OFAC/UAE
+//      consolidated lists, versioned by snapshot date so a screening
+//      hit can always be reproduced from the exact list version that
+//      was live at the time.
+// =====================================================================
+
+enum KycDocumentType {
+  EMIRATES_ID_FRONT
+  EMIRATES_ID_BACK
+  PASSPORT
+  SELFIE
+  VISA_PAGE
+  PROOF_OF_ADDRESS
+}
+
+enum KycDocumentStatus {
+  PENDING_OCR
+  EXTRACTED
+  VERIFIED
+  REJECTED
+  EXPIRED
+}
+
+enum ComplianceIncidentType {
+  SANCTIONS_HIT
+  KYC_REJECTION
+  AML_PATTERN_MATCH
+  PEP_HIT             // Politically Exposed Person
+  HIGH_RISK_COUNTRY
+  IDENTITY_MISMATCH
+  DUPLICATE_IDENTITY
+}
+
+enum ComplianceIncidentStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED_NO_ACTION  // false positive cleared by officer
+  RESOLVED_BLOCKED    // confirmed; account suspended
+  ESCALATED
+}
+
+enum SanctionsListSource {
+  UN_CONSOLIDATED
+  OFAC_SDN
+  UAE_LOCAL
+  EU_CONSOLIDATED
+  UK_HMT
+}
+
+model KycDocument {
+  id                String             @id @default(uuid())
+  employeeId        String
+  type              KycDocumentType
+  status            KycDocumentStatus  @default(PENDING_OCR)
+
+  // Object storage URI (S3 / equivalent). Never store the raw bytes
+  // in Postgres — too big, too sensitive.
+  storageUri        String
+  // sha256 of source image bytes for non-repudiation.
+  imageHash         String
+
+  // Extracted fields. Structured columns where the schema is fixed
+  // (Emirates ID has a known shape), JSON for the long-tail metadata.
+  emiratesIdNumber  String?            // Validated against /^\d{3}-\d{4}-\d{7}-\d{1}$/
+  fullName          String?
+  dateOfBirth       DateTime?
+  nationality       String?            // ISO-3166-1 alpha-3
+  documentExpiry    DateTime?
+  extra             Json?
+
+  // OCR / extractor metadata
+  extractorVersion  String?
+  extractorScore    Float?             // 0..1; below threshold → human review
+  rejectionReason   String?
+
+  // Audit
+  reviewedById      String?            // Internal compliance-officer user id
+  reviewedAt        DateTime?
+
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  employee          Employee           @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([employeeId, type])
+  @@index([status])
+  @@unique([imageHash])
+  @@map("kyc_documents")
+}
+
+model ComplianceIncident {
+  id              String                     @id @default(uuid())
+  employeeId      String
+  type            ComplianceIncidentType
+  status          ComplianceIncidentStatus   @default(OPEN)
+  severity        Int                        // 1..5; 5 = block-the-account
+
+  // Snapshot of the matching evidence so the incident is reproducible
+  // even after the source data has rolled forward.
+  evidence        Json
+  // For SANCTIONS_HIT / PEP_HIT, link the exact list snapshot used.
+  sanctionsListSnapshotId String?
+
+  // Resolution — immutable: a "resolved" event creates a SECOND row,
+  // not an UPDATE on the original. The status field on this row only
+  // reflects the *current* derived state for fast lookup.
+  resolvedById    String?
+  resolvedAt      DateTime?
+  resolutionNote  String?
+
+  createdAt       DateTime                   @default(now())
+
+  employee        Employee                   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  sanctionsListSnapshot SanctionsListSnapshot? @relation(fields: [sanctionsListSnapshotId], references: [id])
+
+  @@index([employeeId, status])
+  @@index([type, createdAt])
+  @@map("compliance_incidents")
+}
+
+// A point-in-time snapshot of a sanctions list. We ingest lists
+// nightly; each ingestion is a new snapshot row so a screening hit can
+// reference the exact list version that produced it.
+model SanctionsListSnapshot {
+  id            String                @id @default(uuid())
+  source        SanctionsListSource
+  publishedAt   DateTime              // When the source published this version
+  ingestedAt    DateTime              @default(now())
+  entryCount    Int
+  checksumSha256 String                @unique // Of the canonical-ordered list payload
+
+  entries       SanctionsListEntry[]
+  incidents     ComplianceIncident[]
+
+  @@unique([source, publishedAt])
+  @@index([source, ingestedAt(sort: Desc)])
+  @@map("sanctions_list_snapshots")
+}
+
+model SanctionsListEntry {
+  id           String                 @id @default(uuid())
+  snapshotId   String
+  externalRef  String                 // ID in the source list (e.g., OFAC SDN UID)
+  fullName     String
+  aliases      String[]
+  dateOfBirth  DateTime?
+  nationality  String?
+  remarks      String?
+
+  // Normalised name for fuzzy matching: lower-cased, diacritic-stripped.
+  normalisedName String
+
+  snapshot     SanctionsListSnapshot  @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+
+  @@index([snapshotId])
+  @@index([normalisedName])
+  @@map("sanctions_list_entries")
 }
