@@ -13,6 +13,7 @@ import {
   checkAdvanceAgainstIntent,
   checkAdvanceFSM,
 } from './invariants';
+import { enforceComplianceForAdvance } from '@modules/compliance/compliance.guard';
 
 /**
  * Settle a single advance against a single payroll intent inside a
@@ -245,6 +246,15 @@ export async function reserveAdvance(args: {
   if (args.amount <= 0) throw BadRequest('Advance amount must be positive');
 
   return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    // 0. Compliance gate. Runs FIRST and on the SAME tx so MVCC sees a
+    //    consistent snapshot for both the open-incident lookup and the
+    //    subsequent ledger writes. Throws ComplianceBlock (HTTP 451) if
+    //    any blocking incident is open, or AppError for status states
+    //    (BLOCKED/DEACTIVATED/PENDING_KYC). The throw aborts the
+    //    transaction before any Advance/LedgerEntry row is created —
+    //    preserving I3 by construction.
+    await enforceComplianceForAdvance(tx, args.employeeId);
+
     // 1. The cycle must exist and be live (OPEN or INTENTS_READY).
     const cycle = await tx.payrollCycle.findUnique({ where: { id: args.cycleId } });
     if (!cycle) throw NotFound(`PayrollCycle ${args.cycleId} not found`);
