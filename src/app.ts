@@ -24,6 +24,7 @@ import { remittanceController } from '@modules/remittance/remittance.controller'
 import { referralsController } from '@modules/referrals/referrals.controller';
 import { notificationsController } from '@modules/notifications/notification.controller';
 import { mobileWalletController } from '@modules/mobile-api/wallet.controller';
+import { reportsController } from '@modules/ops-intel/reports.controller';
 
 // Webhooks
 import { nymcardWebhook } from '@webhooks/nymcard.webhook';
@@ -109,6 +110,10 @@ app.use(`${env.API_PREFIX}/notifications`, notificationsController.router);
 // stack. The legacy /wallet/* surface remains for service-to-service
 // callers; mobile clients target /mobile/wallet/* exclusively.
 app.use(`${env.API_PREFIX}/mobile/wallet`, mobileWalletController.router);
+// Admin ops-intel surface — board-deck metrics, treasury liquidity
+// forecast, on-demand fraud scan. Gated on role=admin inside the
+// controller's router-level middleware.
+app.use(`${env.API_PREFIX}/admin/reports`, reportsController.router);
 
 // =====================================================================
 // 404 + error handlers (last)
