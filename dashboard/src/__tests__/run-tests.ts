@@ -293,10 +293,11 @@ async function runSuite(suite: Suite): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  // Dynamically import the two test files
-  // Both files register their describe/test blocks via the global API above.
+  // Dynamically import the test files. Each registers its describe/test
+  // blocks via the global API above.
   await import("./credit-score.test.ts");
   await import("./transfer.test.ts");
+  await import("./ops-intel-client.test.ts");
 
   for (const suite of rootSuites) {
     await runSuite(suite);

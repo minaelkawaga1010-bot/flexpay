@@ -25,6 +25,7 @@ import {
   Briefcase,
   Network,
   Braces,
+  Gauge,
 } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -54,6 +55,7 @@ const navItems = [
   { id: "cicd-pipeline", label: "CI/CD Pipeline", icon: GitBranch },
   { id: "infrastructure", label: "Infrastructure", icon: Cloud },
   { id: "board-deck", label: "Board Report", icon: Briefcase },
+  { id: "ops-intel", label: "Ops Intelligence", icon: Gauge },
   { id: "system-architecture", label: "System Architecture", icon: Network },
   { id: "backend-engineering", label: "Backend Engineering", icon: Braces },
 ];

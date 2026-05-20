@@ -22,6 +22,7 @@ import { ReferralsPage } from "@/components/pages/referrals-page";
 import { NotificationsPage } from "@/components/pages/notifications-page";
 import { OffersPage } from "@/components/pages/offers-page";
 import { BoardDeckPage } from "@/components/pages/board-deck-page";
+import { OpsIntelPage } from "@/components/pages/ops-intel-page";
 import { SystemArchitecturePage } from "@/components/pages/system-architecture-page";
 import { BackendOverviewPage } from "@/components/pages/backend-overview-page";
 import { motion } from "framer-motion";
@@ -48,6 +49,7 @@ const pageMap: Record<string, React.ComponentType> = {
   "cicd-pipeline": CICDPipelinePage,
   infrastructure: InfrastructurePage,
   "board-deck": BoardDeckPage,
+  "ops-intel": OpsIntelPage,
   "system-architecture": SystemArchitecturePage,
   "backend-engineering": BackendOverviewPage,
 };
