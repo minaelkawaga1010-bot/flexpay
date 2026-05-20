@@ -25,6 +25,7 @@ import { referralsController } from '@modules/referrals/referrals.controller';
 import { notificationsController } from '@modules/notifications/notification.controller';
 import { mobileWalletController } from '@modules/mobile-api/wallet.controller';
 import { reportsController } from '@modules/ops-intel/reports.controller';
+import { payrollIngestionController } from '@modules/payroll-ingestion/payroll-ingestion.controller';
 
 // Webhooks
 import { nymcardWebhook } from '@webhooks/nymcard.webhook';
@@ -114,6 +115,9 @@ app.use(`${env.API_PREFIX}/mobile/wallet`, mobileWalletController.router);
 // forecast, on-demand fraud scan. Gated on role=admin inside the
 // controller's router-level middleware.
 app.use(`${env.API_PREFIX}/admin/reports`, reportsController.router);
+// MOHRE SIF (Salary Information File) ingestion. Raw-body endpoint
+// scoped to admin role. See src/modules/payroll-ingestion/.
+app.use(`${env.API_PREFIX}/admin/payroll`, payrollIngestionController.router);
 
 // =====================================================================
 // 404 + error handlers (last)
