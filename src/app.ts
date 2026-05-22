@@ -28,8 +28,8 @@ import { reportsController } from '@modules/ops-intel/reports.controller';
 import { payrollIngestionController } from '@modules/payroll-ingestion/payroll-ingestion.controller';
 
 // Webhooks
-import { nymcardWebhook } from '@webhooks/nymcard.webhook';
-import { moneyhashWebhook } from '@webhooks/moneyhash.webhook';
+import { nymCardCardWebhook } from '@webhooks/nymcard-card.webhook';
+import { moneyHashRemittanceWebhook } from '@webhooks/moneyhash-remittance.webhook';
 import { flexxpayWebhook } from '@webhooks/flexxpay.webhook';
 
 export const app = express();
@@ -58,8 +58,8 @@ app.use(
 // HMAC signature verification.
 // =====================================================================
 
-app.use('/webhooks/nymcard', express.raw({ type: 'application/json', limit: '1mb' }), nymcardWebhook.router);
-app.use('/webhooks/moneyhash', express.raw({ type: 'application/json', limit: '1mb' }), moneyhashWebhook.router);
+app.use('/webhooks/nymcard', express.raw({ type: 'application/json', limit: '1mb' }), nymCardCardWebhook.router);
+app.use('/webhooks/moneyhash', express.raw({ type: 'application/json', limit: '1mb' }), moneyHashRemittanceWebhook.router);
 app.use('/webhooks/flexxpay', express.raw({ type: 'application/json', limit: '1mb' }), flexxpayWebhook.router);
 
 // =====================================================================
