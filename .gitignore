@@ -8,3 +8,6 @@ coverage/
 .idea/
 .vscode/
 prisma/migrations/dev.db*
+
+# Build artifacts / bundle exports (user-delivered zips)
+*.zip
