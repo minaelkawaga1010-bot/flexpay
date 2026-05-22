@@ -14,6 +14,7 @@ import {
   checkAdvanceFSM,
 } from './invariants';
 import { enforceComplianceForAdvance } from '@modules/compliance/compliance.guard';
+import { acquireWorkerLockScoped, LockScope } from '@shared/utils/advisory-lock';
 
 /**
  * Settle a single advance against a single payroll intent inside a
@@ -246,6 +247,14 @@ export async function reserveAdvance(args: {
   if (args.amount <= 0) throw BadRequest('Advance amount must be positive');
 
   return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    // -1. Per-worker advisory lock (Bible §1.4 / Review A.1). Serializes
+    //     concurrent EWA reservations for the same worker so two
+    //     parallel requests cannot both pass the I1 gate at
+    //     READ COMMITTED isolation. Released on tx commit/rollback.
+    //     Scoped to EWA_RESERVATION so unrelated wallet debits don't
+    //     block each other.
+    await acquireWorkerLockScoped(tx, args.employeeId, LockScope.EWA_RESERVATION);
+
     // 0. Compliance gate. Runs FIRST and on the SAME tx so MVCC sees a
     //    consistent snapshot for both the open-incident lookup and the
     //    subsequent ledger writes. Throws ComplianceBlock (HTTP 451) if
