@@ -17,9 +17,9 @@ import { enforceComplianceForAdvance } from '@modules/compliance/compliance.guar
 import { acquireWorkerLockScoped, LockScope } from '@shared/utils/advisory-lock';
 import {
   effectiveAccruedCap,
-  isCohortFailsafeActive,
   FAILSAFE_ACCRUED_CAP_FRACTION,
 } from '@modules/ops-intel/cohort-failsafe.service';
+import { computeAvailableLimit } from './availability';
 
 /**
  * Settle a single advance against a single payroll intent inside a
@@ -305,15 +305,22 @@ export async function reserveAdvance(args: {
       );
     }
 
-    // 3b. Cohort canary failsafe (STRATEGY §C.3). Read the cohort flag
-    //     inside the SAME locked transaction so it is snapshot-
-    //     consistent with the I1 check. When the employer's cohort has
-    //     tripped the 1.5% uncollectible canary, autonomous limits are
-    //     stripped and per-worker exposure is hard-capped at 20% of
-    //     verifiable accrued wages — independent of the DCSE's output.
-    //     A non-tripped cohort returns the full accrued ceiling, so a
-    //     single tripped employer never affects another cohort.
-    const failsafeActive = await isCohortFailsafeActive(tx, cycle.companyId);
+    // Fetch the cohort's risk config ONCE inside the locked tx so the
+    // failsafe flag + HR-lag buffer are snapshot-consistent with the I1
+    // check and the subsequent ledger writes.
+    const company = await tx.company.findUnique({
+      where: { id: cycle.companyId },
+      select: { ewaFailsafeActive: true, hrLagBufferPercent: true },
+    });
+    const failsafeActive = company?.ewaFailsafeActive ?? false;
+    const hrLagBufferPercent = company?.hrLagBufferPercent ?? 0;
+
+    // 3b. Cohort canary failsafe (STRATEGY §C.3). When the employer's
+    //     cohort has tripped the 1.5% uncollectible canary, autonomous
+    //     limits are stripped and per-worker exposure is hard-capped at
+    //     20% of verifiable accrued wages — independent of DCSE output.
+    //     A non-tripped cohort is unaffected, so one tripped employer
+    //     never degrades another cohort.
     if (failsafeActive) {
       const cap = effectiveAccruedCap(intent.accruedAmount, true);
       if (args.amount > cap) {
@@ -329,6 +336,36 @@ export async function reserveAdvance(args: {
           },
         );
       }
+    }
+
+    // 3c. HR data-lag safety buffer. Apply the cohort's structural
+    //     haircut so an advance can never exceed the buffered, fee-net
+    //     ceiling:
+    //       grossAvailable = MIN(dcseLimit, accrued) × (1 − buffer)
+    //       availableLimit = MAX(0, grossAvailable − fee)
+    //     This absorbs the HR-sync latency window (e.g. a 09:00
+    //     termination that webhooks in at 14:00) so a worker can't
+    //     drain the full accrued amount against stale attendance.
+    const availableLimit = computeAvailableLimit({
+      dcseLimit: args.dcseLimitAtReq,
+      accruedAmount: intent.accruedAmount,
+      hrLagBufferPercent,
+      fee: args.fee,
+    });
+    if (args.amount > availableLimit) {
+      throw new AppError(
+        409,
+        'EXCEEDS_AVAILABLE_LIMIT',
+        `Requested ${args.amount} > available limit ${availableLimit} (HR-lag buffer ${hrLagBufferPercent * 100}%)`,
+        {
+          availableLimit,
+          accruedAmount: intent.accruedAmount,
+          dcseLimit: args.dcseLimitAtReq,
+          hrLagBufferPercent,
+          fee: args.fee,
+          requested: args.amount,
+        },
+      );
     }
 
     // 4. Persist the advance + the ledger reserve entry + wallet credit.

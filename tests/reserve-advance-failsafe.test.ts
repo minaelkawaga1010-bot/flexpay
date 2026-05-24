@@ -56,7 +56,11 @@ const baseArgs = {
   dcseRiskScoreAtReq: 0.7,
 };
 
-function seedCommonReads(opts: { failsafeActive: boolean; accrued: number }) {
+function seedCommonReads(opts: {
+  failsafeActive: boolean;
+  accrued: number;
+  hrLagBufferPercent?: number;
+}) {
   mocked.__tx.$queryRaw.mockResolvedValue([]);
   // compliance guard: active employee, no blocking incident
   mocked.__tx.employee.findUnique.mockResolvedValue({ status: 'ACTIVE' });
@@ -73,7 +77,10 @@ function seedCommonReads(opts: { failsafeActive: boolean; accrued: number }) {
     accruedAmount: opts.accrued,
     currency: 'AED',
   });
-  mocked.__tx.company.findUnique.mockResolvedValue({ ewaFailsafeActive: opts.failsafeActive });
+  mocked.__tx.company.findUnique.mockResolvedValue({
+    ewaFailsafeActive: opts.failsafeActive,
+    hrLagBufferPercent: opts.hrLagBufferPercent ?? 0,
+  });
 }
 
 beforeEach(() => jest.clearAllMocks());
@@ -114,6 +121,45 @@ describe('reserveAdvance — cohort failsafe cap', () => {
 
   it('still enforces I1 first: rejects amount > accrued regardless of failsafe', async () => {
     seedCommonReads({ failsafeActive: false, accrued: 1000 });
+    await expect(reserveAdvance({ ...baseArgs, amount: 1500 })).rejects.toMatchObject({
+      code: 'AMOUNT_EXCEEDS_ACCRUED',
+    });
+  });
+});
+
+describe('reserveAdvance — HR data-lag buffer', () => {
+  // baseArgs: fee 10, dcseLimitAtReq 5000.
+  it('REJECTS an advance above the 10%-buffered ceiling (900 → cap 890 after fee)', async () => {
+    seedCommonReads({ failsafeActive: false, accrued: 1000, hrLagBufferPercent: 0.1 });
+    // MIN(5000,1000)×0.9 − 10 = 890. 900 > 890 → rejected.
+    await expect(reserveAdvance({ ...baseArgs, amount: 900 })).rejects.toMatchObject({
+      code: 'EXCEEDS_AVAILABLE_LIMIT',
+    });
+    expect(mocked.__tx.advance.create).not.toHaveBeenCalled();
+  });
+
+  it('ALLOWS an advance at or below the 10%-buffered ceiling', async () => {
+    seedCommonReads({ failsafeActive: false, accrued: 1000, hrLagBufferPercent: 0.1 });
+    mocked.__tx.advance.create.mockResolvedValue({ id: 'adv-buf', amount: 850 });
+    mocked.__tx.ledgerEntry.create.mockResolvedValue({});
+    mocked.__tx.employee.update.mockResolvedValue({});
+    // 850 <= 890 → allowed
+    const advance = await reserveAdvance({ ...baseArgs, amount: 850 });
+    expect(advance).toMatchObject({ id: 'adv-buf' });
+  });
+
+  it('a 0% buffer allows the full accrued amount minus fee (990 on 1,000)', async () => {
+    seedCommonReads({ failsafeActive: false, accrued: 1000, hrLagBufferPercent: 0 });
+    mocked.__tx.advance.create.mockResolvedValue({ id: 'adv-nobuf', amount: 990 });
+    mocked.__tx.ledgerEntry.create.mockResolvedValue({});
+    mocked.__tx.employee.update.mockResolvedValue({});
+    // MIN(5000,1000)×1.0 − 10 = 990 → allowed at the boundary.
+    const advance = await reserveAdvance({ ...baseArgs, amount: 990 });
+    expect(advance).toMatchObject({ id: 'adv-nobuf' });
+  });
+
+  it('I1 still binds tightly with the buffer present: amount > accrued is rejected first', async () => {
+    seedCommonReads({ failsafeActive: false, accrued: 1000, hrLagBufferPercent: 0.1 });
     await expect(reserveAdvance({ ...baseArgs, amount: 1500 })).rejects.toMatchObject({
       code: 'AMOUNT_EXCEEDS_ACCRUED',
     });

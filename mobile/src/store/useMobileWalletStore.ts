@@ -14,14 +14,34 @@ import logger from '@services/utils/logger';
  * single source of truth and screens can bind to it without
  * accidentally pulling legacy P2P state.
  *
- * The `availableLimit` field on the balance response IS the I1-cap the
- * UI should respect. Don't recompute it client-side; trust the server.
+ * The `availableLimit` field on the balance response IS the buffered
+ * I1-cap the UI should respect. The HR data-lag haircut
+ * (`hrLagBufferPercent`) is already folded into availableLimit
+ * server-side; we ALSO mirror the factor client-side to display the
+ * padded figure and as a defensive cross-check (see paddedAvailableLimit).
  */
 
 interface LastError {
   code: string;
   message: string;
   at: number;
+}
+
+/**
+ * Client-side mirror of the HR-lag haircut. The server's
+ * `availableLimit` already nets the buffer + fee and is authoritative,
+ * but we re-derive the buffered-accrued figure from the ingested
+ * `hrLagBufferPercent` and take the TIGHTER of the two. This guarantees
+ * the UI never offers more than the server's buffered ceiling even if a
+ * stale balance is in state — zero client/server mismatch.
+ *
+ *   bufferedAccrued = accruedWages × (1 − hrLagBufferPercent)
+ *   paddedLimit     = MAX(0, MIN(server.availableLimit, bufferedAccrued))
+ */
+export function paddedAvailableLimit(balance: WalletBalance): number {
+  const buffer = Number.isFinite(balance.hrLagBufferPercent) ? balance.hrLagBufferPercent : 0;
+  const bufferedAccrued = balance.accruedWages * (1 - buffer);
+  return Math.max(0, Math.min(balance.availableLimit, bufferedAccrued));
 }
 
 interface MobileWalletState {
@@ -88,18 +108,23 @@ export const useMobileWalletStore = create<MobileWalletState>()(
 
     requestAdvance: async ({ amount, reason }) => {
       // Cheap UI-side cap so the user can't even submit an obviously
-      // over-limit number. Server enforces it again via I1 inside the
-      // reserveAdvance transaction.
+      // over-limit number. Uses the HR-lag-buffer-mirrored padded limit
+      // (the tighter of server availableLimit and locally-buffered
+      // accrued) so the client cap matches what reserveAdvance enforces
+      // inside its locked transaction.
       const current = useMobileWalletStore.getState().balance;
-      if (current && amount > current.availableLimit) {
-        set((s) => {
-          s.lastError = {
-            code: 'OVER_AVAILABLE_LIMIT',
-            message: `Requested ${amount} AED exceeds your available limit of ${current.availableLimit} AED.`,
-            at: Date.now(),
-          };
-        });
-        return null;
+      if (current) {
+        const cap = paddedAvailableLimit(current);
+        if (amount > cap) {
+          set((s) => {
+            s.lastError = {
+              code: 'OVER_AVAILABLE_LIMIT',
+              message: `Requested ${amount} AED exceeds your available limit of ${cap} AED.`,
+              at: Date.now(),
+            };
+          });
+          return null;
+        }
       }
       try {
         const result = await walletGateway.requestEwaAdvance({ amount, reason });

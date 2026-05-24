@@ -11,6 +11,7 @@ import logger from '@shared/utils/logger';
 import { cardsService } from '@modules/cards/cards.service';
 import { creditScoringService } from '@modules/scoring/scoring.service';
 import { reserveAdvance } from '@modules/payroll-routing/payroll-routing.service';
+import { computeAvailableLimit } from '@modules/payroll-routing/availability';
 import { deviceBinding } from './device-binding';
 import { requireBiometrics } from './biometrics-verify';
 import { requireStepUpOtp, stepUpOtpService } from './step-up-otp';
@@ -113,20 +114,36 @@ export class MobileWalletController {
     });
     if (!employee) throw NotFound('Employee not found');
 
-    const [score, activeIntent] = await Promise.all([
+    const [score, activeIntent, company] = await Promise.all([
       creditScoringService.computeScore(employeeId),
       this.findActiveIntent(employeeId, employee.companyId),
+      employee.companyId
+        ? prisma.company.findUnique({
+            where: { id: employee.companyId },
+            select: { hrLagBufferPercent: true },
+          })
+        : Promise.resolve(null),
     ]);
 
     const accruedWages = activeIntent?.accruedAmount ?? 0;
     const dcseLimit = score.maxEWAAmount;
-    const availableLimit = Math.max(0, Math.min(dcseLimit, accruedWages) - FIXED_EWA_FEE);
+    const hrLagBufferPercent = company?.hrLagBufferPercent ?? 0;
+    // Buffered, fee-net ceiling — identical formula to reserveAdvance
+    // (computeAvailableLimit) so the UI never shows a limit the server
+    // would later reject. The HR-lag haircut is folded in here.
+    const availableLimit = computeAvailableLimit({
+      dcseLimit,
+      accruedAmount: accruedWages,
+      hrLagBufferPercent,
+      fee: FIXED_EWA_FEE,
+    });
 
     res.json({
       walletBalance: employee.walletBalance,
       currency: 'AED',
       accruedWages,
       availableLimit,
+      hrLagBufferPercent,
       dcse: {
         score: score.score,
         eligibleForEWA: score.eligibleForEWA,

@@ -61,6 +61,7 @@ function seedBalance(overrides: Partial<NonNullable<ReturnType<typeof useMobileW
       currency: 'AED',
       accruedWages: 800,
       availableLimit: 790,
+      hrLagBufferPercent: 0.1,
       dcse: {
         score: 0.72,
         eligibleForEWA: true,
