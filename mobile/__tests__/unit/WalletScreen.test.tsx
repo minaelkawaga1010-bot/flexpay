@@ -62,6 +62,7 @@ function seedBalance(overrides: Partial<NonNullable<ReturnType<typeof useMobileW
       accruedWages: 800,
       availableLimit: 790,
       hrLagBufferPercent: 0.1,
+      failsafeActive: false,
       dcse: {
         score: 0.72,
         eligibleForEWA: true,

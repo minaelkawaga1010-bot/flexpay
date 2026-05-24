@@ -116,10 +116,15 @@ export const useMobileWalletStore = create<MobileWalletState>()(
       if (current) {
         const cap = paddedAvailableLimit(current);
         if (amount > cap) {
+          // Surface WHY the cap is low: a tripped cohort failsafe pins
+          // the limit at 20% accrued; otherwise it's the HR-lag haircut.
+          const reasonSuffix = current.failsafeActive
+            ? ' Your employer cohort is under temporary review, so limits are reduced.'
+            : '';
           set((s) => {
             s.lastError = {
               code: 'OVER_AVAILABLE_LIMIT',
-              message: `Requested ${amount} AED exceeds your available limit of ${cap} AED.`,
+              message: `Requested ${amount} AED exceeds your available limit of ${cap} AED.${reasonSuffix}`,
               at: Date.now(),
             };
           });

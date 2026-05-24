@@ -45,6 +45,12 @@ const balanceSchema = z.object({
    * padded limit identically to the server (zero mismatch).
    */
   hrLagBufferPercent: z.number().default(0),
+  /**
+   * True when the worker's employer cohort has tripped the 1.5% canary
+   * circuit breaker — EWA limits are hard-capped at 20% accrued. The
+   * app surfaces this so the worker sees WHY their limit is reduced.
+   */
+  failsafeActive: z.boolean().default(false),
   dcse: z.object({
     score: z.number(),
     eligibleForEWA: z.boolean(),
