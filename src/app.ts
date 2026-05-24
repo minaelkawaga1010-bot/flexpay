@@ -10,6 +10,7 @@ import { checkDatabaseHealth } from '@config/prisma';
 import { checkQueueHealth } from '@config/bull';
 import { errorHandler, notFoundHandler } from '@shared/middleware/error-handler';
 import { apiRateLimiter } from '@shared/middleware/rate-limit';
+import { idempotency } from '@shared/utils/idempotency';
 
 // Controllers
 import { authController } from '@modules/auth/auth.controller';
@@ -29,6 +30,7 @@ import { payrollIngestionController } from '@modules/payroll-ingestion/payroll-i
 
 // Webhooks
 import { nymCardCardWebhook } from '@webhooks/nymcard-card.webhook';
+import { nymCardAuthorizeWebhook } from '@webhooks/nymcard-authorize.webhook';
 import { moneyHashRemittanceWebhook } from '@webhooks/moneyhash-remittance.webhook';
 import { flexxpayWebhook } from '@webhooks/flexxpay.webhook';
 
@@ -58,6 +60,7 @@ app.use(
 // HMAC signature verification.
 // =====================================================================
 
+app.use('/webhooks/nymcard', express.raw({ type: 'application/json', limit: '1mb' }), nymCardAuthorizeWebhook.router);
 app.use('/webhooks/nymcard', express.raw({ type: 'application/json', limit: '1mb' }), nymCardCardWebhook.router);
 app.use('/webhooks/moneyhash', express.raw({ type: 'application/json', limit: '1mb' }), moneyHashRemittanceWebhook.router);
 app.use('/webhooks/flexxpay', express.raw({ type: 'application/json', limit: '1mb' }), flexxpayWebhook.router);
@@ -94,6 +97,17 @@ app.get('/health', async (_req: Request, res: Response) => {
 // =====================================================================
 
 app.use(env.API_PREFIX, apiRateLimiter);
+
+// Bible §5.3.7 — idempotency-key enforcement on every payment-class
+// surface. The middleware is a no-op when no Idempotency-Key header
+// is present, but a key + replay produces the original cached
+// response without re-running the handler. Mounted BEFORE the
+// per-controller routers so it applies uniformly.
+app.use(`${env.API_PREFIX}/wallet`, idempotency);
+app.use(`${env.API_PREFIX}/ewa`, idempotency);
+app.use(`${env.API_PREFIX}/remittance`, idempotency);
+app.use(`${env.API_PREFIX}/mobile/wallet`, idempotency);
+app.use(`${env.API_PREFIX}/admin/payroll`, idempotency);
 
 app.use(`${env.API_PREFIX}/auth`, authController.router);
 app.use(`${env.API_PREFIX}/wallet`, walletController.router);

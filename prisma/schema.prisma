@@ -107,9 +107,15 @@ enum ReferralStatus {
 model Employee {
   id                    String              @id @default(uuid())
   phone                 String              @unique
+  phoneHash             String?             // SHA-256(phone) — Bible §1.5 otp:{phone_hash} key + equality lookup
   email                 String?             @unique
   fullName              String
+  // PII at rest (Bible §5.2). Dual-write target: AES-256-GCM envelopes.
+  // The plaintext columns above remain during the backfill window;
+  // production drops them once every row has an encrypted counterpart.
+  fullNameEncrypted     String?             // AES-256-GCM envelope of fullName
   salary                Float?
+  salaryEncrypted       String?             // AES-256-GCM envelope of salary
 
   walletBalance         Float               @default(0)
   plan                  PlanType            @default(BASIC)
@@ -710,7 +716,12 @@ model KycDocument {
 
   // Extracted fields. Structured columns where the schema is fixed
   // (Emirates ID has a known shape), JSON for the long-tail metadata.
-  emiratesIdNumber  String?            // Validated against /^\d{3}-\d{4}-\d{7}-\d{1}$/
+  // emiratesIdNumber now stores a MASKED form (e.g. 784-****-*****67-1)
+  // for display only — never the full plaintext (Bible §5.2). The
+  // full number is reduced to a one-way SHA-256 hash for equality
+  // checks (SIF matching, dedup). No reversible storage of the EID.
+  emiratesIdNumber  String?            // MASKED display form only
+  emiratesIdHash    String?            // SHA-256(normalised EID) — equality only
   fullName          String?
   dateOfBirth       DateTime?
   nationality       String?            // ISO-3166-1 alpha-3
@@ -733,6 +744,7 @@ model KycDocument {
 
   @@index([employeeId, type])
   @@index([status])
+  @@index([emiratesIdHash])
   @@unique([imageHash])
   @@map("kyc_documents")
 }

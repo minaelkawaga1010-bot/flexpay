@@ -2,12 +2,18 @@ import { Prisma, PayrollCycleStatus } from '@prisma/client';
 import { prisma } from '@config/prisma';
 import logger from '@shared/utils/logger';
 import { AppError, BadRequest } from '@shared/utils/errors';
+import { hashEmiratesId } from '@shared/security/pii-crypto';
 import {
   ParsedSif,
   WpsParserError,
   deriveCyclePeriod,
   parseSif,
 } from './wps-parser.service';
+import {
+  runSifAnomalyPipeline,
+  type SifDecision,
+  type EmployerPayrollHistory,
+} from './sif-anomaly.service';
 
 /**
  * Ingestion orchestrator. Sits between the parser (pure) and the
@@ -53,6 +59,10 @@ export interface IngestionResult {
   unmatchedRowCount: number;
   unknownNationalIds: string[];
   totalSalaryAED: number;
+  /** SIF anomaly decision — present unless skipAnomalyCheck was set. */
+  anomalyDecision?: SifDecision;
+  /** Flags raised by the anomaly pipeline (empty on clean APPROVED). */
+  anomalyFlagCount?: number;
 }
 
 export interface IngestSifArgs {
@@ -60,6 +70,12 @@ export interface IngestSifArgs {
   /** Optional override for the employer ID expected to appear in the EDR. */
   expectedEmployerId?: string;
   file: Buffer | string;
+  /**
+   * Skip the SIF anomaly pipeline (Stages 2-6). Default false. Set
+   * true only for trusted re-ingestion / replay where the anomaly
+   * check already passed.
+   */
+  skipAnomalyCheck?: boolean;
 }
 
 /**
@@ -102,6 +118,35 @@ export async function ingestSifFile(args: IngestSifArgs): Promise<IngestionResul
     );
   }
 
+  // SIF Anomaly Interceptor (Bible §2.1 Stages 2-6). Runs BEFORE the
+  // cycle is created so a HARD_BLOCK refuses ingestion with zero DB
+  // writes. A FLAGGED result proceeds but is surfaced in the result
+  // for the MLRO review queue.
+  let anomalyDecision: SifDecision | undefined;
+  let anomalyFlagCount: number | undefined;
+  if (!args.skipAnomalyCheck) {
+    const history = await loadEmployerPayrollHistory(args.companyId);
+    const report = await runSifAnomalyPipeline({
+      parsed,
+      establishmentId: parsed.header.employerId,
+      history,
+    });
+    anomalyDecision = report.decision;
+    anomalyFlagCount = report.flags.length;
+    if (report.decision === 'BLOCKED') {
+      throw new AppError(
+        422,
+        'SIF_ANOMALY_HARD_BLOCK',
+        'SIF blocked by anomaly interceptor — MLRO review required before resubmission',
+        {
+          ghostCandidates: report.ghostCandidates,
+          flags: report.flags,
+          temporalAnomaly: report.temporalAnomaly,
+        },
+      );
+    }
+  }
+
   const { periodStart, periodEnd } = deriveCyclePeriod(parsed.header.salaryYearMonth);
 
   const existingByPeriod = await prisma.payrollCycle.findUnique({
@@ -124,20 +169,28 @@ export async function ingestSifFile(args: IngestSifArgs): Promise<IngestionResul
   }
 
   // Resolve each SRR's nationalId to a FlexPay-onboarded Employee.
-  // The compliance plane writes nationalId into KycDocument.emiratesIdNumber
-  // on VERIFIED documents. Use that as the canonical join.
-  const nationalIds = parsed.rows.map((r) => r.nationalId);
+  // Post-A.7 the compliance plane stores only the one-way SHA-256 of
+  // the EID (KycDocument.emiratesIdHash), never the plaintext. We hash
+  // each SIF nationalId the same way and join on the hash — equality
+  // matching with zero plaintext EID at rest (Bible §5.2).
+  const hashToNationalId = new Map<string, string>();
+  for (const r of parsed.rows) {
+    hashToNationalId.set(hashEmiratesId(r.nationalId), r.nationalId);
+  }
+  const hashes = [...hashToNationalId.keys()];
   const kyc = await prisma.kycDocument.findMany({
     where: {
-      emiratesIdNumber: { in: nationalIds },
+      emiratesIdHash: { in: hashes },
       status: 'VERIFIED',
       employee: { companyId: args.companyId },
     },
-    select: { emiratesIdNumber: true, employeeId: true },
+    select: { emiratesIdHash: true, employeeId: true },
   });
   const nationalIdToEmployeeId = new Map<string, string>();
   for (const k of kyc) {
-    if (k.emiratesIdNumber) nationalIdToEmployeeId.set(k.emiratesIdNumber, k.employeeId);
+    if (!k.emiratesIdHash) continue;
+    const nationalId = hashToNationalId.get(k.emiratesIdHash);
+    if (nationalId) nationalIdToEmployeeId.set(nationalId, k.employeeId);
   }
 
   const unknownNationalIds: string[] = [];
@@ -214,6 +267,35 @@ export async function ingestSifFile(args: IngestSifArgs): Promise<IngestionResul
     unmatchedRowCount: unknownNationalIds.length,
     unknownNationalIds,
     totalSalaryAED: parsed.trailer.totalSalary,
+    anomalyDecision,
+    anomalyFlagCount,
+  };
+}
+
+/**
+ * Load the employer's trailing payroll history for the temporal
+ * anomaly stage. Uses the last 12 SETTLED/INTENTS_READY cycles, newest
+ * last (chronological), so the statistical baseline reflects recent
+ * behaviour. Returns empty arrays for a first-time employer (the
+ * temporal model treats <2 cycles as "no baseline → not anomalous").
+ */
+async function loadEmployerPayrollHistory(
+  companyId: string,
+): Promise<EmployerPayrollHistory> {
+  const cycles = await prisma.payrollCycle.findMany({
+    where: { companyId },
+    orderBy: { periodStart: 'desc' },
+    take: 12,
+    select: {
+      id: true,
+      intents: { select: { grossAmount: true } },
+    },
+  });
+  // Reverse to chronological order (oldest → newest).
+  const ordered = cycles.reverse();
+  return {
+    cycleTotals: ordered.map((c) => c.intents.reduce((s, i) => s + i.grossAmount, 0)),
+    cycleHeadcounts: ordered.map((c) => c.intents.length),
   };
 }
 
