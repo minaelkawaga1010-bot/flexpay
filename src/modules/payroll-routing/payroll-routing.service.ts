@@ -15,6 +15,11 @@ import {
 } from './invariants';
 import { enforceComplianceForAdvance } from '@modules/compliance/compliance.guard';
 import { acquireWorkerLockScoped, LockScope } from '@shared/utils/advisory-lock';
+import {
+  effectiveAccruedCap,
+  isCohortFailsafeActive,
+  FAILSAFE_ACCRUED_CAP_FRACTION,
+} from '@modules/ops-intel/cohort-failsafe.service';
 
 /**
  * Settle a single advance against a single payroll intent inside a
@@ -298,6 +303,32 @@ export async function reserveAdvance(args: {
         `Requested ${args.amount} > accrued ${intent.accruedAmount}`,
         { accruedAmount: intent.accruedAmount, requested: args.amount },
       );
+    }
+
+    // 3b. Cohort canary failsafe (STRATEGY §C.3). Read the cohort flag
+    //     inside the SAME locked transaction so it is snapshot-
+    //     consistent with the I1 check. When the employer's cohort has
+    //     tripped the 1.5% uncollectible canary, autonomous limits are
+    //     stripped and per-worker exposure is hard-capped at 20% of
+    //     verifiable accrued wages — independent of the DCSE's output.
+    //     A non-tripped cohort returns the full accrued ceiling, so a
+    //     single tripped employer never affects another cohort.
+    const failsafeActive = await isCohortFailsafeActive(tx, cycle.companyId);
+    if (failsafeActive) {
+      const cap = effectiveAccruedCap(intent.accruedAmount, true);
+      if (args.amount > cap) {
+        throw new AppError(
+          409,
+          'COHORT_FAILSAFE_CAP',
+          `Cohort failsafe active — advance capped at ${FAILSAFE_ACCRUED_CAP_FRACTION * 100}% of accrued (${cap})`,
+          {
+            accruedAmount: intent.accruedAmount,
+            failsafeCap: cap,
+            requested: args.amount,
+            capFraction: FAILSAFE_ACCRUED_CAP_FRACTION,
+          },
+        );
+      }
     }
 
     // 4. Persist the advance + the ledger reserve entry + wallet credit.
