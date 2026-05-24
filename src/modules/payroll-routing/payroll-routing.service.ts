@@ -15,6 +15,20 @@ import {
 } from './invariants';
 import { enforceComplianceForAdvance } from '@modules/compliance/compliance.guard';
 import { acquireWorkerLockScoped, LockScope } from '@shared/utils/advisory-lock';
+import {
+  effectiveAccruedCap,
+  FAILSAFE_ACCRUED_CAP_FRACTION,
+} from '@modules/ops-intel/cohort-failsafe.service';
+import { computeAvailableLimit, normaliseBuffer } from './availability';
+import { creditScoringService } from '@modules/scoring/scoring.service';
+
+/**
+ * Fixed EWA processing fee (AED) — FINANCIAL_MODEL §2.1. Single source;
+ * the mobile controller imports this rather than re-declaring it.
+ */
+export const EWA_FIXED_FEE = 10;
+/** DCSE artifact tag stamped on balance reads + advance snapshots. */
+export const DCSE_MODEL_VERSION = 'dcse-v1.0.0';
 
 /**
  * Settle a single advance against a single payroll intent inside a
@@ -300,6 +314,69 @@ export async function reserveAdvance(args: {
       );
     }
 
+    // Fetch the cohort's risk config ONCE inside the locked tx so the
+    // failsafe flag + HR-lag buffer are snapshot-consistent with the I1
+    // check and the subsequent ledger writes.
+    const company = await tx.company.findUnique({
+      where: { id: cycle.companyId },
+      select: { ewaFailsafeActive: true, hrLagBufferPercent: true },
+    });
+    const failsafeActive = company?.ewaFailsafeActive ?? false;
+    const hrLagBufferPercent = company?.hrLagBufferPercent ?? 0;
+
+    // 3b. Cohort canary failsafe (STRATEGY §C.3). When the employer's
+    //     cohort has tripped the 1.5% uncollectible canary, autonomous
+    //     limits are stripped and per-worker exposure is hard-capped at
+    //     20% of verifiable accrued wages — independent of DCSE output.
+    //     A non-tripped cohort is unaffected, so one tripped employer
+    //     never degrades another cohort.
+    if (failsafeActive) {
+      const cap = effectiveAccruedCap(intent.accruedAmount, true);
+      if (args.amount > cap) {
+        throw new AppError(
+          409,
+          'COHORT_FAILSAFE_CAP',
+          `Cohort failsafe active — advance capped at ${FAILSAFE_ACCRUED_CAP_FRACTION * 100}% of accrued (${cap})`,
+          {
+            accruedAmount: intent.accruedAmount,
+            failsafeCap: cap,
+            requested: args.amount,
+            capFraction: FAILSAFE_ACCRUED_CAP_FRACTION,
+          },
+        );
+      }
+    }
+
+    // 3c. HR data-lag safety buffer. Apply the cohort's structural
+    //     haircut so an advance can never exceed the buffered, fee-net
+    //     ceiling:
+    //       grossAvailable = MIN(dcseLimit, accrued) × (1 − buffer)
+    //       availableLimit = MAX(0, grossAvailable − fee)
+    //     This absorbs the HR-sync latency window (e.g. a 09:00
+    //     termination that webhooks in at 14:00) so a worker can't
+    //     drain the full accrued amount against stale attendance.
+    const availableLimit = computeAvailableLimit({
+      dcseLimit: args.dcseLimitAtReq,
+      accruedAmount: intent.accruedAmount,
+      hrLagBufferPercent,
+      fee: args.fee,
+    });
+    if (args.amount > availableLimit) {
+      throw new AppError(
+        409,
+        'EXCEEDS_AVAILABLE_LIMIT',
+        `Requested ${args.amount} > available limit ${availableLimit} (HR-lag buffer ${hrLagBufferPercent * 100}%)`,
+        {
+          availableLimit,
+          accruedAmount: intent.accruedAmount,
+          dcseLimit: args.dcseLimitAtReq,
+          hrLagBufferPercent,
+          fee: args.fee,
+          requested: args.amount,
+        },
+      );
+    }
+
     // 4. Persist the advance + the ledger reserve entry + wallet credit.
     const advance = await tx.advance.create({
       data: {
@@ -337,4 +414,121 @@ export async function reserveAdvance(args: {
 
     return advance;
   });
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Read-only balance view (single source for "what can this worker take")
+// ───────────────────────────────────────────────────────────────────
+
+export interface WalletBalanceView {
+  walletBalance: number;
+  currency: 'AED';
+  accruedWages: number;
+  /** DCSE per-worker ceiling (score.maxEWAAmount). */
+  dcseLimit: number;
+  hrLagBufferPercent: number;
+  failsafeActive: boolean;
+  transactionFee: number;
+  /**
+   * The buffered, failsafe-capped, fee-net ceiling — identical math to
+   * the reserveAdvance gates (computeAvailableLimit over the failsafe-
+   * adjusted accrued base). The UI binds to this; reserveAdvance
+   * re-derives it under the lock, so the two never disagree.
+   */
+  availableLimit: number;
+  dcse: {
+    score: number;
+    eligibleForEWA: boolean;
+    modelVersion: string;
+    nextReviewAt: Date | null;
+  };
+  plan: 'BASIC' | 'LUXURY';
+  cycle: { id: string | null; status: 'ACTIVE' | 'NO_ACTIVE_CYCLE' };
+}
+
+/**
+ * Canonical read-only balance for a worker. The single source of the
+ * EWA-availability math — `reserveAdvance` (write path) and every
+ * client read flow through the same `computeAvailableLimit` +
+ * failsafe-cap composition, so a figure shown to the worker can never
+ * exceed what the locked settlement transaction will allow.
+ *
+ * `cycleId` is optional: when omitted, the active cycle
+ * (OPEN/INTENTS_READY) is resolved server-side — the client never
+ * supplies or pins a cycle (that would be a staleness/authz hole).
+ */
+export async function getEmployeeBalance(
+  employeeId: string,
+  cycleId?: string | null,
+): Promise<WalletBalanceView> {
+  const employee = await prisma.employee.findUnique({
+    where: { id: employeeId },
+    select: {
+      walletBalance: true,
+      companyId: true,
+      plan: true,
+      company: { select: { hrLagBufferPercent: true, ewaFailsafeActive: true } },
+    },
+  });
+  if (!employee) throw NotFound('Employee record not found');
+
+  // Resolve the active cycle's intent. When the caller passed a
+  // cycleId we honour it; otherwise we resolve the live cycle from the
+  // DB (never from client input).
+  const intent = await prisma.payrollIntent.findFirst({
+    where: {
+      employeeId,
+      ...(cycleId
+        ? { cycleId }
+        : {
+            cycle: {
+              companyId: employee.companyId ?? undefined,
+              status: { in: [PayrollCycleStatus.OPEN, PayrollCycleStatus.INTENTS_READY] },
+            },
+          }),
+    },
+    orderBy: { createdAt: 'desc' },
+    select: { cycleId: true, accruedAmount: true },
+  });
+
+  const score = await creditScoringService.computeScore(employeeId);
+  const accruedWages = intent?.accruedAmount ?? 0;
+  const dcseLimit = score.maxEWAAmount;
+  const hrLagBufferPercent = normaliseBuffer(employee.company?.hrLagBufferPercent ?? 0);
+  const failsafeActive = employee.company?.ewaFailsafeActive ?? false;
+
+  // Failsafe caps the accrued base at 20% BEFORE the buffer/fee — same
+  // order reserveAdvance enforces. computeAvailableLimit then applies
+  // the HR-lag haircut and nets the fee.
+  const effectiveAccrued = failsafeActive
+    ? effectiveAccruedCap(accruedWages, true)
+    : accruedWages;
+
+  const availableLimit = computeAvailableLimit({
+    dcseLimit,
+    accruedAmount: effectiveAccrued,
+    hrLagBufferPercent,
+    fee: EWA_FIXED_FEE,
+  });
+
+  return {
+    walletBalance: employee.walletBalance,
+    currency: 'AED',
+    accruedWages,
+    dcseLimit,
+    hrLagBufferPercent,
+    failsafeActive,
+    transactionFee: EWA_FIXED_FEE,
+    availableLimit,
+    dcse: {
+      score: score.score,
+      eligibleForEWA: score.eligibleForEWA,
+      modelVersion: DCSE_MODEL_VERSION,
+      nextReviewAt: score.nextReviewAt ?? null,
+    },
+    plan: employee.plan,
+    cycle: intent
+      ? { id: intent.cycleId, status: 'ACTIVE' }
+      : { id: null, status: 'NO_ACTIVE_CYCLE' },
+  };
 }

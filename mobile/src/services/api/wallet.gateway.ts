@@ -30,13 +30,27 @@ const balanceSchema = z.object({
   currency: z.literal('AED'),
   accruedWages: z.number(),
   /**
-   * Server-computed availableLimit = MAX(0, MIN(DCSE, accrued) - fee).
-   * Encodes I1 (advance ≤ accrued) and the fixed processing fee in a
-   * single client-binding value. The UI MUST cap user-entered advance
-   * amounts at this — the server enforces it again at reserveAdvance,
-   * but a UX-level cap stops the round-trip on obvious overrequests.
+   * Server-computed availableLimit =
+   *   MAX(0, MIN(DCSE, accrued) × (1 − hrLagBufferPercent) − fee).
+   * Encodes I1 (advance ≤ accrued), the HR-lag haircut, and the fixed
+   * processing fee in a single client-binding value. The UI MUST cap
+   * user-entered advance amounts at this — the server enforces it again
+   * at reserveAdvance, but a UX-level cap stops the round-trip on
+   * obvious overrequests.
    */
   availableLimit: z.number(),
+  /**
+   * The cohort's HR data-lag haircut fraction (e.g. 0.10 = 10%). Mirrored
+   * client-side so the app can both display the buffer and re-derive the
+   * padded limit identically to the server (zero mismatch).
+   */
+  hrLagBufferPercent: z.number().default(0),
+  /**
+   * True when the worker's employer cohort has tripped the 1.5% canary
+   * circuit breaker — EWA limits are hard-capped at 20% accrued. The
+   * app surfaces this so the worker sees WHY their limit is reduced.
+   */
+  failsafeActive: z.boolean().default(false),
   dcse: z.object({
     score: z.number(),
     eligibleForEWA: z.boolean(),

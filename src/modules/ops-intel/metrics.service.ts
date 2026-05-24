@@ -1,5 +1,6 @@
 import { prisma } from '@config/prisma';
 import logger from '@shared/utils/logger';
+import { syncCohortFailsafesFromCanary } from './cohort-failsafe.service';
 
 /**
  * Live board-deck metrics.
@@ -209,7 +210,19 @@ async function getOutstandingAdvanceTotal(): Promise<number> {
 }
 
 export class MetricsService {
-  async compile(windowDays: number = DEFAULT_WINDOW_DAYS): Promise<ReportMetrics> {
+  /**
+   * Compile board-deck metrics.
+   *
+   * `enforceFailsafe` is OFF by default so dashboard reads stay
+   * side-effect-free. The dedicated canary worker (`runCanarySweep`)
+   * calls it with `enforceFailsafe: true` to actually trip the
+   * per-cohort circuit breaker (STRATEGY §C.3) — detection alone never
+   * mutates state on a read path.
+   */
+  async compile(
+    windowDays: number = DEFAULT_WINDOW_DAYS,
+    opts: { enforceFailsafe?: boolean } = {},
+  ): Promise<ReportMetrics> {
     const startedAt = Date.now();
 
     const [gmv, mau, defaults, outstanding] = await Promise.all([
@@ -253,6 +266,20 @@ export class MetricsService {
       });
     }
 
+    // Enforcement (canary worker only): persist the per-cohort
+    // failsafe trip so reserveAdvance caps EWA at 20% accrued for the
+    // breaching cohorts. Reads (dashboard) never reach this branch.
+    if (opts.enforceFailsafe && result.canaryTripped) {
+      const breaches = result.companyCohortDefaults
+        .filter((c) => c.defaultRatio >= CANARY_DEFAULT_RATE)
+        .map((c) => ({ companyId: c.companyId, defaultRatio: c.defaultRatio }));
+      const { trippedCount } = await syncCohortFailsafesFromCanary(breaches);
+      logger.warn('canary sweep enforced cohort failsafes', {
+        breachCount: breaches.length,
+        newlyTripped: trippedCount,
+      });
+    }
+
     logger.info('report metrics compiled', {
       windowDays,
       durationMs: Date.now() - startedAt,
@@ -261,6 +288,16 @@ export class MetricsService {
       canaryTripped: result.canaryTripped,
     });
     return result;
+  }
+
+  /**
+   * Canary worker entrypoint. Compiles the rolling-30d metrics and
+   * trips the per-cohort failsafe for any cohort ≥ 1.5%. Registered on
+   * a cron alongside the reconciliation worker.
+   */
+  async runCanarySweep(): Promise<{ canaryTripped: boolean; canaryCompanyIds: string[] }> {
+    const result = await this.compile(DEFAULT_WINDOW_DAYS, { enforceFailsafe: true });
+    return { canaryTripped: result.canaryTripped, canaryCompanyIds: result.canaryCompanyIds };
   }
 }
 

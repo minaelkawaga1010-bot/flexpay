@@ -10,7 +10,12 @@ import { BadRequest, NotFound } from '@shared/utils/errors';
 import logger from '@shared/utils/logger';
 import { cardsService } from '@modules/cards/cards.service';
 import { creditScoringService } from '@modules/scoring/scoring.service';
-import { reserveAdvance } from '@modules/payroll-routing/payroll-routing.service';
+import {
+  reserveAdvance,
+  getEmployeeBalance,
+  EWA_FIXED_FEE,
+  DCSE_MODEL_VERSION,
+} from '@modules/payroll-routing/payroll-routing.service';
 import { deviceBinding } from './device-binding';
 import { requireBiometrics } from './biometrics-verify';
 import { requireStepUpOtp, stepUpOtpService } from './step-up-otp';
@@ -41,8 +46,8 @@ import { mobileRemittanceService } from './remittance.service';
  * routes only carry factors 1+2; mutations carry all four.
  */
 
-const FIXED_EWA_FEE = 10; // AED — per FINANCIAL_MODEL.md §2.1 mid case
-const DCSE_MODEL_VERSION = 'dcse-v1.0.0'; // TODO: pull from DCSE artifact registry once §6.4 is hardened
+// EWA_FIXED_FEE + DCSE_MODEL_VERSION are imported from the payroll-routing
+// service — single source shared with reserveAdvance + getEmployeeBalance.
 
 export class MobileWalletController {
   public readonly router = Router();
@@ -105,39 +110,13 @@ export class MobileWalletController {
    * (`advance ≤ accrued`) is the floor.
    */
   private getBalance = async (req: AuthRequest, res: Response): Promise<void> => {
-    const employeeId = req.user!.id;
-
-    const employee = await prisma.employee.findUnique({
-      where: { id: employeeId },
-      select: { walletBalance: true, companyId: true, status: true, plan: true },
-    });
-    if (!employee) throw NotFound('Employee not found');
-
-    const [score, activeIntent] = await Promise.all([
-      creditScoringService.computeScore(employeeId),
-      this.findActiveIntent(employeeId, employee.companyId),
-    ]);
-
-    const accruedWages = activeIntent?.accruedAmount ?? 0;
-    const dcseLimit = score.maxEWAAmount;
-    const availableLimit = Math.max(0, Math.min(dcseLimit, accruedWages) - FIXED_EWA_FEE);
-
-    res.json({
-      walletBalance: employee.walletBalance,
-      currency: 'AED',
-      accruedWages,
-      availableLimit,
-      dcse: {
-        score: score.score,
-        eligibleForEWA: score.eligibleForEWA,
-        modelVersion: DCSE_MODEL_VERSION,
-        nextReviewAt: score.nextReviewAt,
-      },
-      plan: employee.plan,
-      cycle: activeIntent
-        ? { id: activeIntent.cycleId, status: 'ACTIVE' }
-        : { id: null, status: 'NO_ACTIVE_CYCLE' },
-    });
+    // Single-source delegation: all EWA-availability math (I1 ×
+    // failsafe × HR-lag buffer × fee) lives in getEmployeeBalance, the
+    // same function reserveAdvance's gates derive from. The active
+    // cycle is resolved server-side inside the helper — never supplied
+    // by the client. No arithmetic here.
+    const view = await getEmployeeBalance(req.user!.id);
+    res.json(view);
   };
 
   /**
@@ -179,7 +158,7 @@ export class MobileWalletController {
       employeeId,
       cycleId: cycle.id,
       amount,
-      fee: FIXED_EWA_FEE,
+      fee: EWA_FIXED_FEE,
       dcseModelVersion: DCSE_MODEL_VERSION,
       dcseLimitAtReq: score.maxEWAAmount,
       dcseRiskScoreAtReq: score.score,
@@ -258,34 +237,6 @@ export class MobileWalletController {
     const result = await mobileRemittanceService.send(req.user!.id, quoteId, beneficiary);
     res.json(result);
   };
-
-  // ──────────────────────────────────────────────────────────────────
-  // Internals
-  // ──────────────────────────────────────────────────────────────────
-
-  /**
-   * Find the PayrollIntent representing the worker's accrued wages
-   * for the currently-open cycle, if any. Returns null if no open or
-   * intents-ready cycle exists, or the employee has no row in it.
-   */
-  private async findActiveIntent(
-    employeeId: string,
-    companyId: string | null,
-  ): Promise<{ cycleId: string; accruedAmount: number } | null> {
-    if (!companyId) return null;
-    const intent = await prisma.payrollIntent.findFirst({
-      where: {
-        employeeId,
-        cycle: {
-          companyId,
-          status: { in: [PayrollCycleStatus.OPEN, PayrollCycleStatus.INTENTS_READY] },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-      select: { cycleId: true, accruedAmount: true },
-    });
-    return intent;
-  }
 }
 
 export const mobileWalletController = new MobileWalletController();

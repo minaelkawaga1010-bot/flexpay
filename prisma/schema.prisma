@@ -187,6 +187,27 @@ model Company {
   payrollDay            Int?
   autoPayrollEnabled    Boolean             @default(false)
 
+  // HR data-lag safety buffer. HR webhooks (termination, attendance
+  // correction) can lag the real-world event by hours. During that
+  // window a worker could drain accrued EWA against stale attendance.
+  // This structural haircut shrinks every real-time wage computation
+  // for the cohort by `hrLagBufferPercent` (default 10%), absorbing the
+  // sync latency. Applied inside reserveAdvance's locked tx and
+  // mirrored by the mobile balance computation.
+  hrLagBufferPercent    Float               @default(0.10)
+
+  // DCSE cohort canary failsafe (STRATEGY §C.3). When the cohort's
+  // rolling-30d uncollectible rate breaches 1.5%, the canary worker
+  // sets ewaFailsafeActive=true. reserveAdvance reads this flag inside
+  // the atomic settlement transaction and caps per-worker EWA at 20%
+  // of verifiable accrued wages until a two-person clear re-promotes
+  // the cohort. Per-cohort, so a single tripped employer never
+  // degrades global uptime.
+  ewaFailsafeActive       Boolean           @default(false)
+  ewaFailsafeTrippedAt    DateTime?
+  ewaFailsafeReason       String?
+  ewaFailsafeDefaultRatio Float?
+
   employees             Employee[]
   scheduledPayrolls     ScheduledPayroll[]
   payrollCycles         PayrollCycle[]
@@ -196,6 +217,7 @@ model Company {
 
   @@index([adminEmail])
   @@index([tradeLicense])
+  @@index([ewaFailsafeActive])
   @@map("companies")
 }
 

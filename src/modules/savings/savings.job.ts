@@ -5,6 +5,7 @@ import { enqueueDuePayrolls } from '@modules/payroll/payroll.job';
 import { creditScoringService } from '@modules/scoring/scoring.service';
 import { registerReconciliationCrons } from '@modules/payroll-routing/reconciliation.worker';
 import { registerFraudMonitorCron } from '@modules/ops-intel/fraud-monitor.service';
+import { metricsService } from '@modules/ops-intel/metrics.service';
 
 /**
  * Register every recurring task in one place. Called once during boot.
@@ -40,4 +41,17 @@ export function registerCronJobs(): void {
 
   // Ops-intel: 15-minute velocity + attendance-drop scan.
   registerFraudMonitorCron();
+
+  // DCSE cohort canary sweep (STRATEGY §C.3). Hourly: recompute the
+  // rolling-30d per-cohort uncollectible rate and trip the failsafe
+  // circuit breaker for any cohort ≥ 1.5%. Clearing is a deliberate
+  // two-person action, never automatic.
+  cron.register({
+    name: 'dcse-canary-sweep',
+    expression: '15 * * * *', // hourly at :15
+    handler: async () => {
+      const r = await metricsService.runCanarySweep();
+      logger.info('dcse canary sweep complete', r);
+    },
+  });
 }
