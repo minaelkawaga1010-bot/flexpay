@@ -8,11 +8,19 @@ import logger from '@shared/utils/logger';
 import { startPayrollWorker } from '@modules/payroll/payroll.job';
 import { startNotificationWorker } from '@modules/notifications/notification.job';
 import { registerCronJobs } from '@modules/savings/savings.job';
+import { setPromptFirewall } from '@shared/security/prompt-firewall';
+import { buildPromptFirewallDeps } from '@shared/security/prompt-firewall-impl';
 
 async function startServer(): Promise<void> {
   try {
     await prisma.$connect();
     await redisService.connect();
+
+    // Tool 11 — bind the prompt-injection firewall (Bible §5.3.6).
+    // HTTP adapters when PRESIDIO_URL / INJECTION_CLASSIFIER_URL are
+    // set; local rule-based fallback otherwise. Either way the
+    // firewall is non-null before any LLM call surface comes online.
+    setPromptFirewall(buildPromptFirewallDeps());
 
     // Background workers + scheduled jobs
     startPayrollWorker();

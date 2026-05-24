@@ -10,6 +10,7 @@ import {
 import { prisma } from '@config/prisma';
 import { BadRequest, NotFound } from '@shared/utils/errors';
 import logger from '@shared/utils/logger';
+import { hashEmiratesId, maskEmiratesId } from '@shared/security/pii-crypto';
 import { screenIdentityAgainstSanctions } from './sanctions.service';
 
 /**
@@ -221,7 +222,11 @@ export async function submitKycDocument(args: SubmitKycDocumentArgs) {
       where: { id: doc.id },
       data: {
         status: finalStatus,
-        emiratesIdNumber: extracted.emiratesIdNumber,
+        // PDPL (Bible §5.2): store the MASKED EID for display + a
+        // one-way SHA-256 hash for equality (SIF matching, dedup).
+        // The full plaintext EID never persists.
+        emiratesIdNumber: maskEmiratesId(extracted.emiratesIdNumber),
+        emiratesIdHash: hashEmiratesId(extracted.emiratesIdNumber),
         fullName: extracted.fullName,
         dateOfBirth: extracted.dateOfBirth,
         nationality: extracted.nationality,

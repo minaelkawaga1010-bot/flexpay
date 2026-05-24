@@ -52,6 +52,27 @@ const envSchema = z.object({
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().default(100),
   WEBHOOK_SIGNATURE_HEADER: z.string().default('x-nymcard-signature'),
 
+  // PII encryption (Bible §5.2 — AES-256-GCM app-layer + KMS envelope)
+  // PII_DATA_KEY is the base64-encoded 32-byte data-encryption key. In
+  // production this is the KMS-unwrapped DEK injected at boot; in
+  // dev/test a static key is acceptable. Optional so unit tests that
+  // never touch crypto still boot.
+  PII_DATA_KEY: z.string().optional(),
+  // Optional pepper appended before hashing Emirates IDs. Leaving it
+  // unset yields the Bible's plain SHA-256 (cross-system comparable);
+  // setting it hardens against rainbow-table attacks at the cost of
+  // cross-system equality. Keep unset unless every consumer shares it.
+  EMIRATES_ID_HASH_PEPPER: z.string().optional(),
+  // Keyed ledger integrity (Bible §1.3). Unset → plain SHA-256.
+  LEDGER_INTEGRITY_KEY: z.string().optional(),
+
+  // Fraud / ML service endpoints (pluggable; heuristic fallback when unset)
+  FRAUD_SCORER_URL: z.string().url().optional(),
+  PRESIDIO_URL: z.string().url().optional(),
+  INJECTION_CLASSIFIER_URL: z.string().url().optional(),
+  MOHRE_API_BASE: z.string().url().optional(),
+  MOHRE_API_KEY: z.string().optional(),
+
   // Business Logic
   APP_NAME: z.string().default('FlexPay'),
   APP_URL: z.string().url().default('http://localhost:3000'),

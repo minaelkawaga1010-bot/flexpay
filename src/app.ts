@@ -30,6 +30,7 @@ import { payrollIngestionController } from '@modules/payroll-ingestion/payroll-i
 
 // Webhooks
 import { nymCardCardWebhook } from '@webhooks/nymcard-card.webhook';
+import { nymCardAuthorizeWebhook } from '@webhooks/nymcard-authorize.webhook';
 import { moneyHashRemittanceWebhook } from '@webhooks/moneyhash-remittance.webhook';
 import { flexxpayWebhook } from '@webhooks/flexxpay.webhook';
 
@@ -59,6 +60,7 @@ app.use(
 // HMAC signature verification.
 // =====================================================================
 
+app.use('/webhooks/nymcard', express.raw({ type: 'application/json', limit: '1mb' }), nymCardAuthorizeWebhook.router);
 app.use('/webhooks/nymcard', express.raw({ type: 'application/json', limit: '1mb' }), nymCardCardWebhook.router);
 app.use('/webhooks/moneyhash', express.raw({ type: 'application/json', limit: '1mb' }), moneyHashRemittanceWebhook.router);
 app.use('/webhooks/flexxpay', express.raw({ type: 'application/json', limit: '1mb' }), flexxpayWebhook.router);
