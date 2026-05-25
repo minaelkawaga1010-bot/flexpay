@@ -47,6 +47,16 @@ export function paddedAvailableLimit(balance: WalletBalance): number {
 interface MobileWalletState {
   balance: WalletBalance | null;
   isLoading: boolean;
+  /**
+   * In-flight guard for the EWA request. True from the moment a request
+   * is dispatched until it settles. Screens bind the "Withdraw" button's
+   * loading/disabled state to this so a double-tap can't fire two
+   * concurrent reservations (which would double-prompt biometrics and
+   * race the step-up modal — the second enqueue would REPLACE the first
+   * with a STEP_UP_REPLACED rejection). The server advisory lock already
+   * prevents double-spend; this closes the UX hole above it.
+   */
+  isSubmittingAdvance: boolean;
   lastFetchAt: number | null;
   /** Surface the most recent gateway error in a structured way for screens to react to. */
   lastError: LastError | null;
@@ -80,6 +90,7 @@ export const useMobileWalletStore = create<MobileWalletState>()(
   immer((set) => ({
     balance: null,
     isLoading: false,
+    isSubmittingAdvance: false,
     lastFetchAt: null,
     lastError: null,
 
@@ -107,6 +118,15 @@ export const useMobileWalletStore = create<MobileWalletState>()(
     },
 
     requestAdvance: async ({ amount, reason }) => {
+      // Double-tap guard: if a reservation is already in flight, ignore
+      // the repeat tap entirely. Prevents two concurrent biometric
+      // prompts + a step-up modal race (the 2nd enqueue would REPLACE
+      // the 1st with a STEP_UP_REPLACED rejection). No-op return, no
+      // error surfaced — the first request owns the flow.
+      if (useMobileWalletStore.getState().isSubmittingAdvance) {
+        return null;
+      }
+
       // Cheap UI-side cap so the user can't even submit an obviously
       // over-limit number. Uses the HR-lag-buffer-mirrored padded limit
       // (the tighter of server availableLimit and locally-buffered
@@ -131,6 +151,11 @@ export const useMobileWalletStore = create<MobileWalletState>()(
           return null;
         }
       }
+
+      // Lock the UI for the duration of the advisory-locked server tx.
+      set((s) => {
+        s.isSubmittingAdvance = true;
+      });
       try {
         const result = await walletGateway.requestEwaAdvance({ amount, reason });
         // Re-fetch balance to pick up updated walletBalance and the
@@ -148,12 +173,20 @@ export const useMobileWalletStore = create<MobileWalletState>()(
           s.lastError = toLastError(err);
         });
         return null;
+      } finally {
+        // Always release the lock — network timeout, biometric cancel,
+        // step-up dismissal, or success all unlock the button. No path
+        // leaves the UI frozen.
+        set((s) => {
+          s.isSubmittingAdvance = false;
+        });
       }
     },
 
     reset: () =>
       set((s) => {
         s.balance = null;
+        s.isSubmittingAdvance = false;
         s.lastFetchAt = null;
         s.lastError = null;
       }),
