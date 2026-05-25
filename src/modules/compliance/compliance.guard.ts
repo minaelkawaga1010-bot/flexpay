@@ -47,6 +47,27 @@ export const BLOCKING_INCIDENT_STATUSES: ComplianceIncidentStatus[] = [
 
 export const HOT_PATH_BLOCKING_SEVERITY = 3;
 
+/**
+ * Incident types where revealing the classification to the subject is a
+ * "tipping-off" offence under UAE/FATF AML rules — you must NOT inform a
+ * sanctioned / AML-flagged person that they've been flagged. For these,
+ * the client-facing response is a GENERIC transient error
+ * (503 SERVICE_UNAVAILABLE) indistinguishable from an outage; the real
+ * classification lives only in the incident row + server audit logs.
+ *
+ * Non-sensitive operational blocks (KYC rejection, etc.) keep the
+ * informative 451 so the worker knows to act.
+ */
+export const TIPPING_OFF_SENSITIVE_TYPES: ComplianceIncidentType[] = [
+  ComplianceIncidentType.SANCTIONS_HIT,
+  ComplianceIncidentType.PEP_HIT,
+  ComplianceIncidentType.AML_PATTERN_MATCH,
+];
+
+export function isTippingOffSensitive(type: ComplianceIncidentType): boolean {
+  return TIPPING_OFF_SENSITIVE_TYPES.includes(type);
+}
+
 export class ComplianceBlock extends AppError {
   constructor(
     public readonly employeeId: string,
@@ -54,13 +75,39 @@ export class ComplianceBlock extends AppError {
     public readonly incidentType: ComplianceIncidentType,
     public readonly severity: number,
   ) {
-    super(
-      451,
-      'COMPLIANCE_BLOCK',
-      `Account flagged: ${incidentType} (severity ${severity}). Money movement disabled pending compliance review.`,
-      { incidentId, incidentType, severity },
-    );
+    // Wire shape is computed BEFORE super() (static, no `this`) so the
+    // conditional doesn't break parameter-property initialization.
+    const w = ComplianceBlock.wireShape(incidentId, incidentType, severity);
+    super(w.status, w.code, w.message, w.details);
     this.name = 'ComplianceBlock';
+  }
+
+  /**
+   * Anti-tipping-off: for sanctions/PEP/AML, present a generic transient
+   * error with only an opaque support reference — never the
+   * classification. The truth stays in `incidentType`/`severity`
+   * (instance props, logged server-side) but is NEVER serialized to the
+   * client. Operational blocks (KYC) stay informative.
+   */
+  private static wireShape(
+    incidentId: string,
+    incidentType: ComplianceIncidentType,
+    severity: number,
+  ): { status: number; code: string; message: string; details: Record<string, unknown> } {
+    if (isTippingOffSensitive(incidentType)) {
+      return {
+        status: 503,
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'This action is temporarily unavailable. Please try again later or contact support.',
+        details: { ref: incidentId },
+      };
+    }
+    return {
+      status: 451,
+      code: 'COMPLIANCE_BLOCK',
+      message: `Account flagged: ${incidentType} (severity ${severity}). Money movement disabled pending compliance review.`,
+      details: { incidentId, incidentType, severity },
+    };
   }
 }
 
