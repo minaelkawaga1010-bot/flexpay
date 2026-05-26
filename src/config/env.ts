@@ -58,6 +58,9 @@ const envSchema = z.object({
   // dev/test a static key is acceptable. Optional so unit tests that
   // never touch crypto still boot.
   PII_DATA_KEY: z.string().optional(),
+  // AWS KMS CMK id. When set together with PII_WRAPPED_DEK, the boot
+  // gate unwraps the DEK via KMS before serving traffic.
+  KMS_KEY_ID: z.string().optional(),
   // Optional pepper appended before hashing Emirates IDs. Leaving it
   // unset yields the Bible's plain SHA-256 (cross-system comparable);
   // setting it hardens against rainbow-table attacks at the cost of

@@ -10,11 +10,20 @@ import { startNotificationWorker } from '@modules/notifications/notification.job
 import { registerCronJobs } from '@modules/savings/savings.job';
 import { setPromptFirewall } from '@shared/security/prompt-firewall';
 import { buildPromptFirewallDeps } from '@shared/security/prompt-firewall-impl';
+import { bindPiiKeyProviderOrCrash } from '@shared/security/kms-key-provider';
 
 async function startServer(): Promise<void> {
   try {
     await prisma.$connect();
     await redisService.connect();
+
+    // ── KMS BOOT-GATE (Day-Zero §1.1) ──────────────────────────────
+    // Resolve + bind the PII data key (KMS-unwrapped DEK in prod, env
+    // key in dev/test) and prove it round-trips, BEFORE any worker,
+    // cron, or the HTTP listener comes online. A failure here crashes
+    // the process — we never serve traffic or run a worker that could
+    // touch employee rows with a broken or wrong PII key.
+    await bindPiiKeyProviderOrCrash();
 
     // Tool 11 — bind the prompt-injection firewall (Bible §5.3.6).
     // HTTP adapters when PRESIDIO_URL / INJECTION_CLASSIFIER_URL are

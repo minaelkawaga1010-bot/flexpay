@@ -20,6 +20,7 @@ import {
   FAILSAFE_ACCRUED_CAP_FRACTION,
 } from '@modules/ops-intel/cohort-failsafe.service';
 import { computeAvailableLimit, normaliseBuffer } from './availability';
+import { enforceLiquidityCeiling } from './liquidity-gate';
 import { creditScoringService } from '@modules/scoring/scoring.service';
 
 /**
@@ -376,6 +377,14 @@ export async function reserveAdvance(args: {
         },
       );
     }
+
+    // 3d. Global liquidity gate. Caps total outstanding (RESERVED)
+    //     float against the configured deployable-capital ceiling so
+    //     the platform can never front more cash than it holds. Reads
+    //     committed float on THIS tx (snapshot-consistent with the
+    //     write below). No-op when unconfigured; throws a transient
+    //     503 LIQUIDITY_CEILING when the pool is at capacity.
+    await enforceLiquidityCeiling(tx, args.amount);
 
     // 4. Persist the advance + the ledger reserve entry + wallet credit.
     const advance = await tx.advance.create({
