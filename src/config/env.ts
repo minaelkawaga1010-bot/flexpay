@@ -40,6 +40,7 @@ const envSchema = z.object({
   FLEXXPAY_API_KEY: z.string().optional(),
   FLEXXPAY_API_BASE: z.string().url().default('https://sandbox.flexxpay.com/v1'),
   FLEXXPAY_REDIRECT_URL: z.string().url().default('https://flexpay.ae/ewa/success'),
+  FLEXXPAY_WEBHOOK_SECRET: z.string().optional(),
 
   // Firebase
   FIREBASE_PROJECT_ID: z.string().optional(),

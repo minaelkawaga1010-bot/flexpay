@@ -554,6 +554,9 @@ model PayrollCycle {
 
   @@unique([companyId, periodStart, periodEnd])
   @@index([status, settledAt])
+  // Liquidity forecaster buckets inbound funding by periodEnd over
+  // OPEN/INTENTS_READY cycles — filter on status + periodEnd.
+  @@index([status, periodEnd])
   @@map("payroll_cycles")
 }
 
@@ -604,6 +607,9 @@ model Advance {
 
   @@index([employeeId, status])
   @@index([cycleId, status])
+  // Time-window scans: metrics/canary rolling-30d default ratio +
+  // liquidity outstanding-float aggregate filter on status + requestedAt.
+  @@index([status, requestedAt])
   @@map("advances")
 }
 

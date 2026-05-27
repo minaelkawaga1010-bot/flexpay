@@ -92,7 +92,11 @@ export const cardsService = {
           brand: result.card.brand,
           expiryMonth: result.card.expiryMonth,
           expiryYear: result.card.expiryYear,
-          shippingAddress: address as unknown as Prisma.InputJsonValue,
+          // JSON-normalize: strips `undefined` optional fields (which
+          // Prisma.InputJsonValue rejects) and guarantees a JSON-safe
+          // value at runtime — removing the `as unknown as` compiler
+          // bypass while being structurally correct.
+          shippingAddress: JSON.parse(JSON.stringify(address)) as Prisma.InputJsonValue,
           shippingStatus: 'PENDING',
           employeeId,
         },
