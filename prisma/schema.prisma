@@ -24,6 +24,16 @@ enum EmployeeStatus {
   DEACTIVATED
 }
 
+/// CBUAE Universal Account / SVF framework — allowed WPS wage-receipt
+/// vehicles. PREPAID_CARD is *not* a valid wage payee under the new
+/// rules: the wallet (IBAN-addressed, SVF/bank-backed) is the payee;
+/// the NymCard card is a downstream spend instrument only.
+enum WageReceiptVehicle {
+  UNIVERSAL_ACCOUNT
+  BANK_ACCOUNT
+  SVF_WALLET
+}
+
 enum CompanyStatus {
   ACTIVE
   SUSPENDED
@@ -119,6 +129,14 @@ model Employee {
 
   walletBalance         Float               @default(0)
   plan                  PlanType            @default(BASIC)
+
+  // CBUAE Universal Account compliance (wage-receipt vehicle).
+  // The wallet — NOT a prepaid card — is the WPS payee. wpsLicensedEntity
+  // identifies the licensed bank or SVF licence holder backing this
+  // wallet (e.g. "NYMCARD_SVF", "<partner_bank_BIC>"). Both must be
+  // populated before a worker can be onboarded as a WPS payee.
+  wageReceiptVehicle    WageReceiptVehicle?
+  wpsLicensedEntity     String?
 
   status                EmployeeStatus      @default(PENDING_KYC)
   kycVerifiedAt         DateTime?

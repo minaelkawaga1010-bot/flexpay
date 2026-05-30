@@ -3,6 +3,7 @@ import { prisma } from '@config/prisma';
 import logger from '@shared/utils/logger';
 import { AppError, BadRequest } from '@shared/utils/errors';
 import { hashEmiratesId } from '@shared/security/pii-crypto';
+import { assertWpsCompliantVehicle } from '@modules/wps-compliance/wps-payment-method';
 import {
   ParsedSif,
   WpsParserError,
@@ -58,6 +59,14 @@ export interface IngestionResult {
   intentsCreated: number;
   unmatchedRowCount: number;
   unknownNationalIds: string[];
+  /**
+   * Workers matched by Emirates-ID hash but excluded from intent
+   * materialisation because their wage-receipt vehicle is missing /
+   * not classified as a Universal Account / Bank account / SVF wallet.
+   * Surfaced for ops to complete the CBUAE-compliant wallet
+   * provisioning before the next cycle.
+   */
+  nonCompliantNationalIds: string[];
   totalSalaryAED: number;
   /** SIF anomaly decision — present unless skipAnomalyCheck was set. */
   anomalyDecision?: SifDecision;
@@ -194,11 +203,42 @@ export async function ingestSifFile(args: IngestSifArgs): Promise<IngestionResul
   }
 
   const unknownNationalIds: string[] = [];
+  const nonCompliantNationalIds: string[] = [];
   const matched: Array<{ row: typeof parsed.rows[number]; employeeId: string }> = [];
+
+  // CBUAE Universal Account gate: every matched worker must carry a
+  // valid wage-receipt-vehicle classification + a licensed-entity
+  // backing. A worker missing either is excluded from intent
+  // materialisation (NEVER routed to a prepaid card) and surfaced for
+  // ops to complete the wallet provisioning.
+  const matchedIds = [...nationalIdToEmployeeId.values()];
+  const compliantRows = matchedIds.length
+    ? await prisma.employee.findMany({
+        where: { id: { in: matchedIds } },
+        select: { id: true, wageReceiptVehicle: true, wpsLicensedEntity: true },
+      })
+    : [];
+  const compliantSet = new Set(
+    compliantRows
+      .filter((e) => {
+        try {
+          assertWpsCompliantVehicle(e);
+          return true;
+        } catch {
+          return false;
+        }
+      })
+      .map((e) => e.id),
+  );
+
   for (const row of parsed.rows) {
     const employeeId = nationalIdToEmployeeId.get(row.nationalId);
     if (!employeeId) {
       unknownNationalIds.push(row.nationalId);
+      continue;
+    }
+    if (!compliantSet.has(employeeId)) {
+      nonCompliantNationalIds.push(row.nationalId);
       continue;
     }
     matched.push({ row, employeeId });
@@ -266,6 +306,7 @@ export async function ingestSifFile(args: IngestSifArgs): Promise<IngestionResul
     intentsCreated: matched.length,
     unmatchedRowCount: unknownNationalIds.length,
     unknownNationalIds,
+    nonCompliantNationalIds,
     totalSalaryAED: parsed.trailer.totalSalary,
     anomalyDecision,
     anomalyFlagCount,
