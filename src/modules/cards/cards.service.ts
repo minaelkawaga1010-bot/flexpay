@@ -4,11 +4,61 @@ import { env } from '@config/env';
 import { nymcardService } from './nymcard.service';
 import { BadRequest, NotFound } from '@shared/utils/errors';
 import { NymCardAddress, WalletType } from '@shared/types/nymcard';
+import { assertWpsCompliantVehicle } from '@modules/wps-compliance/wps-payment-method';
+
+/**
+ * Card-issuance service.
+ *
+ * ─── Regulatory characterisation (CBUAE Universal Account framework) ──
+ *
+ * A FlexPay card — virtual or physical, NymCard-issued, Mastercard-
+ * scheme — is a DOWNSTREAM SPEND INSTRUMENT linked to the worker's
+ * SVF wallet. It is NEVER a WPS wage-receipt vehicle.
+ *
+ * The wage-receipt vehicle on a worker is one of:
+ *   • UNIVERSAL_ACCOUNT  — CBUAE Universal Account
+ *   • BANK_ACCOUNT       — licensed-bank account (IBAN-addressed)
+ *   • SVF_WALLET         — Stored Value Facility wallet (e.g. NymCard
+ *                          SVF licence; FlexPay as Program Manager)
+ *
+ * The legacy "salary card" / prepaid-card-as-payee model is deprecated
+ * under the new CBUAE rules and is REFUSED at the schema level (the
+ * `WageReceiptVehicle` enum does not include PREPAID_CARD) and at the
+ * provisioning gate (`src/modules/wps-compliance/wps-payment-method.ts`,
+ * `validateWpsPaymentMethod`).
+ *
+ * This service enforces the invariant at issuance time by calling
+ * `assertWpsCompliantVehicle` BEFORE creating a card row. A worker
+ * without an explicit, compliant wage-receipt classification cannot
+ * receive a card on top of an unclassified wallet — the WPS payee
+ * (the IBAN-addressed wallet) must exist first, and the card is
+ * provisioned as a Mastercard-scheme spend handle on that wallet.
+ *
+ * Wire-shape contract:
+ *   • WPS SIF settlement credits the SVF WALLET (the IBAN-addressed
+ *     payee), not the card PAN. See `src/modules/payroll-ingestion/`.
+ *   • Card authorisations (NymCard /authorize webhook) debit the
+ *     wallet, never settle a wage payment. See
+ *     `src/webhooks/nymcard-authorize.webhook.ts`.
+ *   • Card refunds credit the wallet. The PAN is a routing handle,
+ *     not a balance carrier.
+ *
+ * Audit cross-references:
+ *   • `assertWpsCompliantVehicle` — the regulatory precondition.
+ *   • `WageReceiptVehicle` enum — the schema-level seal that prevents
+ *     PREPAID_CARD from ever appearing in the classification union.
+ *   • `validateWpsPaymentMethod` — the provisioning-time gate that
+ *     rejects raw `prepaid_card` strings on the boundary.
+ */
 
 export const cardsService = {
   /**
    * Auto-issue NymCard customer + virtual card for a freshly-created
    * employee. Idempotent: existing customer/card are returned.
+   *
+   * Precondition: the employee must already carry a compliant
+   * wage-receipt-vehicle classification + licensed-entity backing.
+   * Cards ride on the wallet; the wallet must exist first.
    */
   async issueVirtualCard(employeeId: string) {
     const employee = await prisma.employee.findUnique({
@@ -16,6 +66,15 @@ export const cardsService = {
       include: { cards: true },
     });
     if (!employee) throw NotFound('Employee not found');
+
+    // CBUAE Universal Account gate. Cards are downstream of the
+    // wallet — the wallet's classification + licensed-entity backing
+    // must be set before we can provision the spend instrument.
+    assertWpsCompliantVehicle({
+      id: employee.id,
+      wageReceiptVehicle: employee.wageReceiptVehicle,
+      wpsLicensedEntity: employee.wpsLicensedEntity,
+    });
 
     const existingVirtual = employee.cards.find((c) => c.type === 'VIRTUAL');
     if (existingVirtual) return existingVirtual;
@@ -58,6 +117,15 @@ export const cardsService = {
       include: { cards: true },
     });
     if (!employee) throw NotFound('Employee not found');
+
+    // Same WPS gate — physical issuance is downstream of the wallet
+    // too. Refuse a physical card on an unclassified wallet.
+    assertWpsCompliantVehicle({
+      id: employee.id,
+      wageReceiptVehicle: employee.wageReceiptVehicle,
+      wpsLicensedEntity: employee.wpsLicensedEntity,
+    });
+
     if (!employee.nymcardCustomerId) {
       throw BadRequest('Virtual card must be issued before ordering a physical card');
     }
