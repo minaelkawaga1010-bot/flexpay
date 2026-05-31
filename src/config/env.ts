@@ -42,6 +42,9 @@ const envSchema = z.object({
   FLEXXPAY_REDIRECT_URL: z.string().url().default('https://flexpay.ae/ewa/success'),
   FLEXXPAY_WEBHOOK_SECRET: z.string().optional(),
 
+  // Biller rail (Free Bills feature — DEWA/SEWA/Etisalat/etc.)
+  BILLER_WEBHOOK_SECRET: z.string().optional(),
+
   // Firebase
   FIREBASE_PROJECT_ID: z.string().optional(),
   FIREBASE_PRIVATE_KEY: z.string().optional(),

@@ -53,6 +53,7 @@ enum TransactionType {
   PAYROLL
   REMITTANCE
   REFUND
+  BILL_PAYMENT
 }
 
 enum TransactionStatus {
@@ -60,6 +61,27 @@ enum TransactionStatus {
   COMPLETED
   FAILED
   REVERSED
+}
+
+/// UAE utility / telecom / government billers supported by the Free Bills surface.
+/// Extend as new biller adapters land.
+enum BillerType {
+  DEWA              // Dubai Electricity & Water Authority
+  SEWA              // Sharjah Electricity & Water Authority
+  ADDC              // Abu Dhabi Distribution Company
+  FEWA              // Federal Electricity & Water Authority
+  ETISALAT
+  DU
+  SALIK             // Dubai toll
+  RTA               // Roads & Transport (parking, fines)
+  OTHER
+}
+
+enum BillPaymentStatus {
+  PENDING           // wallet debited, biller dispatch in-flight or unconfirmed
+  COMPLETED         // biller acknowledged success (terminal)
+  FAILED            // biller rejected or rail error → wallet refunded
+  REVERSED          // post-completion reversal (rare; biller-initiated)
 }
 
 enum PayrollStatus {
@@ -173,6 +195,9 @@ model Employee {
   // Compliance plane back-references
   kycDocuments          KycDocument[]
   complianceIncidents   ComplianceIncident[]
+
+  // Bill-payment surface (Free Bills)
+  billPayments          BillPayment[]
 
   // Inverse sides of the Referral relation
   referralsMade         Referral[]          @relation("ReferralsMade")
@@ -862,4 +887,54 @@ model SanctionsListEntry {
   @@index([snapshotId])
   @@index([normalisedName])
   @@map("sanctions_list_entries")
+}
+
+// =====================================================================
+// Free Bills — utility / telecom / government bill payments
+//
+// Each payment row is the canonical record of an inbound user request;
+// the linked EmployeeTransaction is the wallet-statement entry the user
+// actually sees. Both share an idempotency contract: the public
+// idempotency_key is UNIQUE on this table, and the wallet txn carries
+// `bill:<key>` so a replayed request never double-debits.
+//
+// Lifecycle: PENDING (wallet debited, biller dispatched) → COMPLETED
+// (biller webhook ack) | FAILED (refund posted, wallet credited back).
+// =====================================================================
+
+model BillPayment {
+  id                    String              @id @default(uuid())
+  employeeId            String
+  employee              Employee            @relation(fields: [employeeId], references: [id])
+
+  billerType            BillerType
+  /// Biller-side account identifier (DEWA premise no., mobile number,
+  /// Salik plate, etc.). Format-validated per-biller at the adapter.
+  billerAccountRef      String
+  amount                Float
+  fee                   Float               @default(0)
+  totalAmount           Float
+  currency              String              @default("AED")
+
+  status                BillPaymentStatus   @default(PENDING)
+  failureReason         String?
+
+  /// Biller-returned reference (set on adapter dispatch). The webhook
+  /// looks up the row via this ref.
+  externalRef           String?
+  /// UNIQUE — request-level idempotency key from the caller.
+  idempotencyKey        String              @unique
+
+  /// Linked statement rows (debit on PENDING, refund on FAILED).
+  walletTransactionId   String?
+  refundTransactionId   String?
+
+  metadata              Json?
+  createdAt             DateTime            @default(now())
+  processedAt           DateTime?
+
+  @@index([employeeId, createdAt])
+  @@index([status, createdAt])
+  @@index([externalRef])
+  @@map("bill_payments")
 }

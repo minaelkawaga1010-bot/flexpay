@@ -33,6 +33,7 @@ import { nymCardCardWebhook } from '@webhooks/nymcard-card.webhook';
 import { nymCardAuthorizeWebhook } from '@webhooks/nymcard-authorize.webhook';
 import { moneyHashRemittanceWebhook } from '@webhooks/moneyhash-remittance.webhook';
 import { flexxpayWebhook } from '@webhooks/flexxpay.webhook';
+import { billerWebhook } from '@webhooks/biller.webhook';
 
 export const app = express();
 
@@ -64,6 +65,7 @@ app.use('/webhooks/nymcard', express.raw({ type: 'application/json', limit: '1mb
 app.use('/webhooks/nymcard', express.raw({ type: 'application/json', limit: '1mb' }), nymCardCardWebhook.router);
 app.use('/webhooks/moneyhash', express.raw({ type: 'application/json', limit: '1mb' }), moneyHashRemittanceWebhook.router);
 app.use('/webhooks/flexxpay', express.raw({ type: 'application/json', limit: '1mb' }), flexxpayWebhook.router);
+app.use('/webhooks/biller', express.raw({ type: 'application/json', limit: '1mb' }), billerWebhook.router);
 
 // =====================================================================
 // Body parsing + logging + compression
