@@ -1,0 +1,736 @@
+{
+  "name": "WPS Payroll Ingest — S3 → CBUAE Validation → Bulk POST",
+  "nodes": [
+    {
+      "parameters": {
+        "bucketName": "={{$vars.SIF_INGEST_BUCKET}}",
+        "events": ["s3:ObjectCreated:*"],
+        "prefix": "incoming/",
+        "suffix": ".sif"
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000001",
+      "name": "S3 Trigger — incoming/*.sif",
+      "type": "n8n-nodes-base.awsS3Trigger",
+      "typeVersion": 1,
+      "position": [-1400, 0],
+      "credentials": {
+        "aws": {
+          "id": "aws-flexpay-sif",
+          "name": "AWS — FlexPay SIF Bucket"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "bucketName": "={{$json.bucket}}",
+        "fileKey": "={{$json.key}}",
+        "binaryPropertyName": "sif"
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000002",
+      "name": "Download SIF Object",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [-1180, 0],
+      "credentials": {
+        "aws": {
+          "id": "aws-flexpay-sif",
+          "name": "AWS — FlexPay SIF Bucket"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "action": "hash",
+        "type": "SHA256",
+        "binaryData": true,
+        "binaryPropertyName": "sif",
+        "dataPropertyName": "fingerprint",
+        "encoding": "hex"
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000003",
+      "name": "SHA-256 Stream Hash",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [-960, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decode the SIF buffer to UTF-8 text once for the parser. SIF\n// is pipe-delimited ASCII; non-ASCII is a hard reject (CBUAE rule).\nconst item = items[0];\nconst bin = item.binary.sif;\nif (!bin) throw new Error('SIF binary attachment missing');\nconst raw = Buffer.from(bin.data, 'base64');\nconst text = raw.toString('utf8');\n// Reject non-printable / non-ASCII early — CBUAE SIF spec mandates\n// 7-bit ASCII. Anything else means corruption or wrong-encoding upload.\nfor (let i = 0; i < text.length; i++) {\n  const c = text.charCodeAt(i);\n  if (c > 127 || (c < 32 && c !== 9 && c !== 10 && c !== 13)) {\n    throw new Error(`Non-ASCII byte at offset ${i} (0x${c.toString(16)}) — CBUAE SIF requires 7-bit ASCII.`);\n  }\n}\nreturn [{\n  json: {\n    ...item.json,\n    fingerprint: item.json.fingerprint,\n    byteLength: raw.length,\n    sifText: text,\n  },\n  binary: item.binary,\n}];"
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000004",
+      "name": "Decode + ASCII Guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-740, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// CBUAE Universal Account framework pre-validation.\n//\n// Parses the SIF header (SCR — record type 1) + employee detail\n// records (SEDR — record type 2). Pipe-delimited. Verifies the\n// structural + regulatory invariants BEFORE the bulk POST so a\n// malformed file never reaches the backend transactional path.\n//\n// CBUAE Universal Account rules enforced here:\n//   • Employer EID is 14 digits (MOHRE register format).\n//   • SCR salary cycle from ≤ cycle to.\n//   • Currency code is AED (only AED-denominated WPS files are\n//     accepted at the Phase-1 ingest gate).\n//   • Every SEDR carries a 23-char UAE IBAN routing the wage to a\n//     wage-receipt VEHICLE (bank account / SVF wallet / Universal\n//     Account). A 16-digit card PAN in the routing column is a hard\n//     reject — prepaid cards are no longer permitted as the WPS payee.\n//   • SCR record count matches actual SEDR count.\n//   • SCR total amount matches the SEDR amount sum (fils-precision).\n//\n// On any violation, throw with a structured error code so the\n// downstream router moves the file to the rejected/ prefix and\n// surfaces the precise CBUAE rule that fired.\nconst item = items[0];\nconst lines = item.json.sifText\n  .split(/\\r?\\n/)\n  .map((l) => l.trim())\n  .filter((l) => l.length > 0);\nif (lines.length === 0) throw new Error('SIF_EMPTY');\n\nfunction parseLine(line, lineNo) {\n  const parts = line.split('|');\n  if (parts.length < 2) {\n    const e = new Error(`SIF_MALFORMED_LINE@${lineNo}`);\n    e.context = { lineNo, line };\n    throw e;\n  }\n  return parts;\n}\n\nconst header = parseLine(lines[0], 1);\nif (header[0] !== '1') {\n  const e = new Error('SIF_HEADER_NOT_SCR');\n  e.context = { actualRecordType: header[0] };\n  throw e;\n}\n// SCR layout: 1|employer_eid|file_creator_eid|file_creation_date|file_creation_time|cycle_from|cycle_to|salary_month|record_count|total_amount|currency\nconst [, employerEid, fileCreatorEid, fileDate, fileTime, cycleFrom, cycleTo, salaryMonth, recordCountStr, totalAmountStr, currency] = header;\n\nif (!/^\\d{14}$/.test(employerEid)) {\n  const e = new Error('SIF_EMPLOYER_EID_INVALID');\n  e.context = { employerEid };\n  throw e;\n}\nif (currency !== 'AED') {\n  const e = new Error('SIF_CURRENCY_NOT_AED');\n  e.context = { currency };\n  throw e;\n}\nif (!/^\\d{8}$/.test(cycleFrom) || !/^\\d{8}$/.test(cycleTo) || cycleFrom > cycleTo) {\n  const e = new Error('SIF_CYCLE_DATES_INVALID');\n  e.context = { cycleFrom, cycleTo };\n  throw e;\n}\nconst declaredCount = Number(recordCountStr);\nconst declaredTotal = Number(totalAmountStr);\nif (!Number.isFinite(declaredCount) || declaredCount < 0) {\n  throw new Error('SIF_RECORD_COUNT_INVALID');\n}\nif (!Number.isFinite(declaredTotal) || declaredTotal < 0) {\n  throw new Error('SIF_TOTAL_AMOUNT_INVALID');\n}\n\n// Verify the expectedEmployerId guard — set by the company-config\n// node if the bucket-side key carries an expected-employer hint.\nconst expectedEmployerId = item.json.expectedEmployerId;\nif (expectedEmployerId && expectedEmployerId !== employerEid) {\n  const e = new Error('SIF_EMPLOYER_EID_MISMATCH');\n  e.context = { expected: expectedEmployerId, actual: employerEid };\n  throw e;\n}\n\nlet actualCount = 0;\nlet runningTotalFils = 0;\nconst sedrErrors = [];\nfor (let i = 1; i < lines.length; i++) {\n  const r = parseLine(lines[i], i + 1);\n  if (r[0] !== '2') continue; // future record types tolerated for forward-compat\n  actualCount++;\n  // SEDR layout: 2|employee_eid|routing_code|account_number|salary_amount|...\n  const [, employeeEid, routingCode, accountNumber, salaryAmountStr] = r;\n  if (!/^\\d{14,15}$/.test(employeeEid)) {\n    sedrErrors.push({ lineNo: i + 1, code: 'SEDR_EMPLOYEE_EID_INVALID', employeeEid });\n    continue;\n  }\n  // CBUAE rule: account_number must be a 23-char UAE IBAN OR an\n  // SVF wallet handle prefixed `SVF_`. A bare 16-digit card PAN\n  // means someone is trying to route the wage payment into a\n  // prepaid card — explicitly disallowed under the new framework.\n  const isIBAN = /^AE\\d{21}$/.test(accountNumber);\n  const isSvfHandle = /^SVF_[A-Z0-9]{8,32}$/.test(accountNumber);\n  const isCardPAN = /^\\d{16}$/.test(accountNumber);\n  if (isCardPAN) {\n    sedrErrors.push({ lineNo: i + 1, code: 'WPS_INVALID_PREPAID_CARD_ROUTING', employeeEid });\n    continue;\n  }\n  if (!isIBAN && !isSvfHandle) {\n    sedrErrors.push({ lineNo: i + 1, code: 'SEDR_ROUTING_INVALID', employeeEid, accountNumber });\n    continue;\n  }\n  const amt = Number(salaryAmountStr);\n  if (!Number.isFinite(amt) || amt <= 0) {\n    sedrErrors.push({ lineNo: i + 1, code: 'SEDR_SALARY_INVALID', employeeEid });\n    continue;\n  }\n  // Track in fils (×100) to dodge IEEE-754 drift across thousands\n  // of rows. The declared total is in AED with 2 d.p.\n  runningTotalFils += Math.round(amt * 100);\n  if (!routingCode || routingCode.trim() === '') {\n    sedrErrors.push({ lineNo: i + 1, code: 'SEDR_ROUTING_CODE_MISSING', employeeEid });\n  }\n}\n\nif (sedrErrors.length > 0) {\n  const e = new Error('SIF_SEDR_VALIDATION_FAILED');\n  e.context = { errorCount: sedrErrors.length, first10: sedrErrors.slice(0, 10) };\n  throw e;\n}\nif (actualCount !== declaredCount) {\n  const e = new Error('SIF_COUNT_MISMATCH');\n  e.context = { declared: declaredCount, actual: actualCount };\n  throw e;\n}\nconst declaredTotalFils = Math.round(declaredTotal * 100);\nif (runningTotalFils !== declaredTotalFils) {\n  const e = new Error('SIF_TOTAL_MISMATCH');\n  e.context = { declaredFils: declaredTotalFils, actualFils: runningTotalFils };\n  throw e;\n}\n\nreturn [{\n  json: {\n    ...item.json,\n    parsed: {\n      employerEid,\n      fileCreatorEid,\n      fileDate,\n      fileTime,\n      cycleFrom,\n      cycleTo,\n      salaryMonth,\n      recordCount: actualCount,\n      totalAmountAed: declaredTotal,\n      currency,\n    },\n  },\n  binary: item.binary,\n}];"
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000005",
+      "name": "CBUAE Pre-Validate (SCR + SEDR)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-520, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Resolve companyId from the S3 key. We allow either:\n//   • `incoming/<companyId-uuid>/<yyyymm>.sif`\n//   • `incoming/<employerEid-14digit>/<yyyymm>.sif`\n//\n// In the EID-keyed form, we look up companyId via the backend's\n// companies-by-employerEid endpoint (admin-scoped). The UUID-keyed\n// form is the fast path — production CI configures this layout.\nconst item = items[0];\nconst key = item.json.key || '';\nconst segments = key.split('/');\nif (segments.length < 3 || segments[0] !== 'incoming') {\n  throw new Error('SIF_KEY_LAYOUT_UNEXPECTED');\n}\nconst routingSegment = segments[1];\nconst UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\nconst EID_RE = /^\\d{14}$/;\nlet resolveMode;\nif (UUID_RE.test(routingSegment)) {\n  resolveMode = 'companyId';\n} else if (EID_RE.test(routingSegment)) {\n  resolveMode = 'employerEid';\n} else {\n  throw new Error('SIF_KEY_ROUTING_SEGMENT_UNRECOGNISED');\n}\nreturn [{\n  json: {\n    ...item.json,\n    routingSegment,\n    resolveMode,\n    expectedEmployerId: resolveMode === 'employerEid' ? routingSegment : undefined,\n  },\n  binary: item.binary,\n}];"
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000006",
+      "name": "Resolve companyId from Key",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-300, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "fb1",
+              "leftValue": "={{$json.resolveMode}}",
+              "rightValue": "employerEid",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000007",
+      "name": "IF EID-keyed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-80, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{$vars.FLEXPAY_API_BASE}}/api/v1/admin/companies/by-employer-eid/{{$json.routingSegment}}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Workflow-Request-Id",
+              "value": "={{$execution.id}}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": false
+            }
+          },
+          "retry": {
+            "maxAttempts": 3,
+            "waitBetween": 2000
+          }
+        }
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000008",
+      "name": "Lookup companyId by EID",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [140, -160],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "flexpay-admin-bearer",
+          "name": "FlexPay Admin Bearer Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge the looked-up companyId back into the routing context.\nconst lookupItem = items[0];\nreturn [{\n  json: {\n    ...lookupItem.json,\n    companyId: lookupItem.json.companyId || lookupItem.json.id,\n  },\n  binary: lookupItem.binary,\n}];"
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000009",
+      "name": "Set companyId (EID path)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [360, -160]
+    },
+    {
+      "parameters": {
+        "jsCode": "// UUID path — routingSegment IS the companyId.\nconst item = items[0];\nreturn [{\n  json: {\n    ...item.json,\n    companyId: item.json.routingSegment,\n  },\n  binary: item.binary,\n}];"
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000010",
+      "name": "Set companyId (UUID path)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [140, 160]
+    },
+    {
+      "parameters": {
+        "mode": "combineAll",
+        "options": {}
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000011",
+      "name": "Merge Routing Branches",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [580, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$vars.FLEXPAY_API_BASE}}/api/v1/admin/payroll/ingest-sif",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "companyId",
+              "value": "={{$json.companyId}}"
+            },
+            {
+              "name": "expectedEmployerId",
+              "value": "={{$json.parsed.employerEid}}"
+            }
+          ]
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/octet-stream"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "sif:{{$json.fingerprint}}"
+            },
+            {
+              "name": "X-Workflow-Request-Id",
+              "value": "={{$execution.id}}"
+            },
+            {
+              "name": "X-File-Fingerprint-SHA256",
+              "value": "={{$json.fingerprint}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "sif",
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "retry": {
+            "maxAttempts": 5,
+            "waitBetween": 4000
+          }
+        }
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000012",
+      "name": "POST /admin/payroll/ingest-sif",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [800, 0],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "flexpay-admin-bearer",
+          "name": "FlexPay Admin Bearer Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "ok",
+              "leftValue": "={{$json.statusCode}}",
+              "rightValue": 201,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000013",
+      "name": "IF 201 Created?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1020, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "4xx",
+              "leftValue": "={{$json.statusCode}}",
+              "rightValue": 500,
+              "operator": {
+                "type": "number",
+                "operation": "smaller"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000014",
+      "name": "IF 4xx (parse/auth reject)?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1240, 180]
+    },
+    {
+      "parameters": {
+        "operation": "copy",
+        "bucketName": "={{$node['S3 Trigger — incoming/*.sif'].json.bucket}}",
+        "sourceKey": "={{$node['S3 Trigger — incoming/*.sif'].json.key}}",
+        "destinationKey": "=processed/{{$node['CBUAE Pre-Validate (SCR + SEDR)'].json.parsed.employerEid}}/{{$node['CBUAE Pre-Validate (SCR + SEDR)'].json.parsed.salaryMonth}}/{{$node['SHA-256 Stream Hash'].json.fingerprint}}.sif",
+        "additionalFields": {
+          "metadata": {
+            "metadataValues": [
+              {
+                "key": "x-flexpay-cycleId",
+                "value": "={{$json.body.cycleId}}"
+              },
+              {
+                "key": "x-flexpay-fingerprint",
+                "value": "={{$node['SHA-256 Stream Hash'].json.fingerprint}}"
+              },
+              {
+                "key": "x-flexpay-workflow-execution",
+                "value": "={{$execution.id}}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000015",
+      "name": "Archive → processed/",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [1240, -180],
+      "credentials": {
+        "aws": {
+          "id": "aws-flexpay-sif",
+          "name": "AWS — FlexPay SIF Bucket"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "bucketName": "={{$node['S3 Trigger — incoming/*.sif'].json.bucket}}",
+        "fileKey": "={{$node['S3 Trigger — incoming/*.sif'].json.key}}"
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000016",
+      "name": "Delete incoming/ original",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [1460, -180],
+      "credentials": {
+        "aws": {
+          "id": "aws-flexpay-sif",
+          "name": "AWS — FlexPay SIF Bucket"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "copy",
+        "bucketName": "={{$node['S3 Trigger — incoming/*.sif'].json.bucket}}",
+        "sourceKey": "={{$node['S3 Trigger — incoming/*.sif'].json.key}}",
+        "destinationKey": "=rejected/{{$now.format('yyyy-MM-dd')}}/{{$node['SHA-256 Stream Hash'].json.fingerprint}}.sif",
+        "additionalFields": {
+          "metadata": {
+            "metadataValues": [
+              {
+                "key": "x-flexpay-rejection-status",
+                "value": "={{$json.statusCode}}"
+              },
+              {
+                "key": "x-flexpay-rejection-code",
+                "value": "={{$json.body.code || 'UNKNOWN'}}"
+              },
+              {
+                "key": "x-flexpay-workflow-execution",
+                "value": "={{$execution.id}}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000017",
+      "name": "Archive → rejected/",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [1460, 80],
+      "credentials": {
+        "aws": {
+          "id": "aws-flexpay-sif",
+          "name": "AWS — FlexPay SIF Bucket"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{$vars.SLACK_OPS_CHANNEL_ID}}",
+          "mode": "id"
+        },
+        "text": "=:no_entry: *SIF rejected* — `{{$node['S3 Trigger — incoming/*.sif'].json.key}}`\\nStatus: `{{$json.statusCode}}` Code: `{{$json.body.code || 'UNKNOWN'}}`\\nFingerprint: `{{$node['SHA-256 Stream Hash'].json.fingerprint}}`\\nExecution: <{{$env.N8N_HOST}}/execution/{{$execution.id}}|view>",
+        "otherOptions": {}
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000018",
+      "name": "Slack — Rejection Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1680, 80],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-flexpay-ops",
+          "name": "Slack — FlexPay Ops"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "copy",
+        "bucketName": "={{$node['S3 Trigger — incoming/*.sif'].json.bucket}}",
+        "sourceKey": "={{$node['S3 Trigger — incoming/*.sif'].json.key}}",
+        "destinationKey": "=dlq/{{$now.format('yyyy-MM-dd')}}/{{$node['SHA-256 Stream Hash'].json.fingerprint}}.sif",
+        "additionalFields": {
+          "metadata": {
+            "metadataValues": [
+              {
+                "key": "x-flexpay-dlq-reason",
+                "value": "5xx-after-retry-budget"
+              },
+              {
+                "key": "x-flexpay-last-status",
+                "value": "={{$json.statusCode}}"
+              },
+              {
+                "key": "x-flexpay-workflow-execution",
+                "value": "={{$execution.id}}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000019",
+      "name": "Archive → dlq/",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [1460, 320],
+      "credentials": {
+        "aws": {
+          "id": "aws-flexpay-sif",
+          "name": "AWS — FlexPay SIF Bucket"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{$vars.SLACK_PAGER_CHANNEL_ID}}",
+          "mode": "id"
+        },
+        "text": "=:rotating_light: *SIF DLQ — backend 5xx after retry budget exhausted*\\nKey: `{{$node['S3 Trigger — incoming/*.sif'].json.key}}`\\nLast status: `{{$json.statusCode}}`\\nFingerprint: `{{$node['SHA-256 Stream Hash'].json.fingerprint}}`\\nExecution: <{{$env.N8N_HOST}}/execution/{{$execution.id}}|view>\\n_Human-in-the-loop required: triage the backend incident before manually re-enqueueing the DLQ object._",
+        "otherOptions": {}
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000020",
+      "name": "Slack — Pager (DLQ)",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1680, 320],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-flexpay-ops",
+          "name": "Slack — FlexPay Ops"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "errorMessage": "=SIF ingest failed: pre-validation or routing error. See execution {{$execution.id}}.",
+        "options": {}
+      },
+      "id": "f1a4b1c2-1111-4001-9000-000000000021",
+      "name": "Stop on Pre-Validation Error",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [-520, 240]
+    }
+  ],
+  "connections": {
+    "S3 Trigger — incoming/*.sif": {
+      "main": [
+        [
+          {
+            "node": "Download SIF Object",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download SIF Object": {
+      "main": [
+        [
+          {
+            "node": "SHA-256 Stream Hash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SHA-256 Stream Hash": {
+      "main": [
+        [
+          {
+            "node": "Decode + ASCII Guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decode + ASCII Guard": {
+      "main": [
+        [
+          {
+            "node": "CBUAE Pre-Validate (SCR + SEDR)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CBUAE Pre-Validate (SCR + SEDR)": {
+      "main": [
+        [
+          {
+            "node": "Resolve companyId from Key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve companyId from Key": {
+      "main": [
+        [
+          {
+            "node": "IF EID-keyed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF EID-keyed?": {
+      "main": [
+        [
+          {
+            "node": "Lookup companyId by EID",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Set companyId (UUID path)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup companyId by EID": {
+      "main": [
+        [
+          {
+            "node": "Set companyId (EID path)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set companyId (EID path)": {
+      "main": [
+        [
+          {
+            "node": "Merge Routing Branches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set companyId (UUID path)": {
+      "main": [
+        [
+          {
+            "node": "Merge Routing Branches",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Routing Branches": {
+      "main": [
+        [
+          {
+            "node": "POST /admin/payroll/ingest-sif",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST /admin/payroll/ingest-sif": {
+      "main": [
+        [
+          {
+            "node": "IF 201 Created?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF 201 Created?": {
+      "main": [
+        [
+          {
+            "node": "Archive → processed/",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF 4xx (parse/auth reject)?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Archive → processed/": {
+      "main": [
+        [
+          {
+            "node": "Delete incoming/ original",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF 4xx (parse/auth reject)?": {
+      "main": [
+        [
+          {
+            "node": "Archive → rejected/",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Archive → dlq/",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Archive → rejected/": {
+      "main": [
+        [
+          {
+            "node": "Slack — Rejection Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Archive → dlq/": {
+      "main": [
+        [
+          {
+            "node": "Slack — Pager (DLQ)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "timezone": "Asia/Dubai",
+    "errorWorkflow": "",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [
+    { "name": "flexpay" },
+    { "name": "wps" },
+    { "name": "cbuae" },
+    { "name": "production" }
+  ],
+  "pinData": {},
+  "versionId": "1.0.0",
+  "id": "wf-wps-payroll-ingest"
+}
