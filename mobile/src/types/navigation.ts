@@ -21,6 +21,7 @@ export type AppTabParamList = {
 
 export type WalletStackParamList = {
   WalletHome: undefined;
+  SalaryDashboard: undefined;
   Transactions: undefined;
   Transfer: undefined;
   TransactionDetail: { transactionId: string };

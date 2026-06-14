@@ -50,6 +50,20 @@
     "savings": "Savings",
     "recent_transactions": "Recent activity"
   },
+  "salary": {
+    "wallet_balance": "Salary wallet",
+    "cycle_accrued": "Earned this cycle",
+    "cycle_last_settled": "Last settled cycle",
+    "send": "Send",
+    "recent_wps_movements": "Recent wage movements",
+    "compliance_badge": "WPS · Universal Account",
+    "empty_title": "No wage movements yet",
+    "empty_subtitle": "Your next payroll credit will appear here once it settles.",
+    "status_pending": "Pending settlement",
+    "error_title": "Couldn't load wage history",
+    "error_body": "We hit a snag fetching your recent WPS movements. Pull to refresh or tap retry.",
+    "retry": "Try again"
+  },
   "wallet": {
     "balance": "Balance",
     "accrued_this_cycle": "Earned this cycle",
