@@ -27,6 +27,7 @@ import { notificationsController } from '@modules/notifications/notification.con
 import { mobileWalletController } from '@modules/mobile-api/wallet.controller';
 import { reportsController } from '@modules/ops-intel/reports.controller';
 import { payrollIngestionController } from '@modules/payroll-ingestion/payroll-ingestion.controller';
+import { billPaymentController } from '@modules/bill-payment/bill-payment.controller';
 
 // Webhooks
 import { nymCardCardWebhook } from '@webhooks/nymcard-card.webhook';
@@ -134,6 +135,9 @@ app.use(`${env.API_PREFIX}/admin/reports`, reportsController.router);
 // MOHRE SIF (Salary Information File) ingestion. Raw-body endpoint
 // scoped to admin role. See src/modules/payroll-ingestion/.
 app.use(`${env.API_PREFIX}/admin/payroll`, payrollIngestionController.router);
+// Free Bills — bill-payment surface. Idempotency middleware applied
+// inside the controller on POST /bills/pay so list/get stay cheap.
+app.use(`${env.API_PREFIX}/bills`, billPaymentController.router);
 
 // =====================================================================
 // 404 + error handlers (last)
