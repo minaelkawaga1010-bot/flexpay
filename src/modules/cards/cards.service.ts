@@ -207,4 +207,122 @@ export const cardsService = {
       },
     });
   },
+
+  /**
+   * Freeze (BLOCK) the named card for the calling employee.
+   *
+   * Atomic: the NymCard rail call happens BEFORE the local row update
+   * so a rail failure leaves the local state unchanged. Idempotent on
+   * already-BLOCKED rows (no rail call, no audit row).
+   *
+   * Ownership: we deliberately scope by `{ id: cardId, employeeId }`
+   * — a worker cannot freeze a card they don't own even if the route
+   * is hit with a guessed cardId.
+   */
+  async freezeCard(employeeId: string, cardId: string) {
+    const card = await prisma.card.findFirst({ where: { id: cardId, employeeId } });
+    if (!card) throw NotFound('Card not found');
+    if (card.status === 'BLOCKED') return card;
+
+    await nymcardService.blockCard(card.cardId);
+
+    return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      const updated = await tx.card.update({
+        where: { id: card.id },
+        data: { status: 'BLOCKED' },
+      });
+      await tx.auditLog.create({
+        data: {
+          actorType: 'employee',
+          actorId: employeeId,
+          action: 'CARD_FROZEN',
+          resourceType: 'Card',
+          resourceId: card.id,
+          metadata: { nymcardId: card.cardId } as Prisma.InputJsonValue,
+        },
+      });
+      return updated;
+    });
+  },
+
+  /**
+   * Unfreeze (unblock) the named card. Idempotent on already-ACTIVE
+   * rows. Returns the card row in its post-update state.
+   *
+   * Defence: we refuse to unfreeze cards whose status is EXPIRED or
+   * REPLACED — those terminal states must be resolved by re-issuance,
+   * not by a user-initiated unblock.
+   */
+  async unfreezeCard(employeeId: string, cardId: string) {
+    const card = await prisma.card.findFirst({ where: { id: cardId, employeeId } });
+    if (!card) throw NotFound('Card not found');
+    if (card.status === 'ACTIVE') return card;
+    if (card.status === 'EXPIRED' || card.status === 'REPLACED') {
+      throw BadRequest('Card is in a terminal state and cannot be reactivated');
+    }
+
+    await nymcardService.unblockCard(card.cardId);
+
+    return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      const updated = await tx.card.update({
+        where: { id: card.id },
+        data: { status: 'ACTIVE' },
+      });
+      await tx.auditLog.create({
+        data: {
+          actorType: 'employee',
+          actorId: employeeId,
+          action: 'CARD_UNFROZEN',
+          resourceType: 'Card',
+          resourceId: card.id,
+          metadata: { nymcardId: card.cardId } as Prisma.InputJsonValue,
+        },
+      });
+      return updated;
+    });
+  },
+
+  /**
+   * Reveal the full PAN + CVV for short-lived display in the mobile
+   * app. The caller MUST have cleared the step-up-OTP gate via the
+   * usual auth middleware; this method assumes a clean reveal
+   * authorisation has already happened.
+   *
+   * SECURITY:
+   *   • The PAN / CVV are NEVER persisted server-side beyond the
+   *     audit-row write (which logs only the cardId, not the PAN).
+   *   • The mobile client renders them in component-local state with
+   *     an auto-clear timer; no Zustand / Keychain persistence.
+   *   • Audit log captures the reveal — needed for chargeback /
+   *     fraud-review traceability.
+   */
+  async revealCardDetails(employeeId: string, cardId: string) {
+    const card = await prisma.card.findFirst({ where: { id: cardId, employeeId } });
+    if (!card) throw NotFound('Card not found');
+    if (card.status !== 'ACTIVE') {
+      throw BadRequest('Card details can only be revealed when ACTIVE');
+    }
+
+    const { pan, cvv } = await nymcardService.getSensitiveCardDetails(card.cardId);
+
+    await prisma.auditLog.create({
+      data: {
+        actorType: 'employee',
+        actorId: employeeId,
+        action: 'CARD_DETAILS_REVEALED',
+        resourceType: 'Card',
+        resourceId: card.id,
+        // PAN / CVV deliberately omitted from the audit metadata —
+        // the action itself is what's traceable, not the values.
+        metadata: { nymcardId: card.cardId } as Prisma.InputJsonValue,
+      },
+    });
+
+    return {
+      pan,
+      cvv,
+      expiryMonth: card.expiryMonth,
+      expiryYear: card.expiryYear,
+    };
+  },
 };

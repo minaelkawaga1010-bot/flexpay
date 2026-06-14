@@ -159,6 +159,38 @@ export class NymCardService {
     await this.withRetry(() => this.client.post(`/cards/${cardId}/block`));
   }
 
+  async unblockCard(cardId: string): Promise<void> {
+    if (!this.isConfigured) {
+      logger.info('[nymcard:stub] unblockCard', { cardId });
+      return;
+    }
+    await this.withRetry(() => this.client.post(`/cards/${cardId}/unblock`));
+  }
+
+  /**
+   * Pull the full, sensitive card details (PAN + CVV) from NymCard
+   * for a transient, biometrically-gated display in the mobile app.
+   *
+   * SENSITIVE — the response carries the FULL PAN and CVV. The mobile
+   * client renders these in a component-local state slot, never in
+   * Zustand or any persistent store. The controller delegates the
+   * step-up gate to the auth middleware; this method only knows that
+   * the caller has already cleared the gate by the time we are
+   * invoked.
+   */
+  async getSensitiveCardDetails(cardId: string): Promise<{ pan: string; cvv: string }> {
+    if (!this.isConfigured) {
+      logger.info('[nymcard:stub] getSensitiveCardDetails', { cardId });
+      // Deterministic stub for unit tests / sandbox. NEVER returned
+      // in production — guarded by the isConfigured check above.
+      return { pan: '5555555555554321', cvv: '321' };
+    }
+    return this.withRetry(async () => {
+      const { data } = await this.client.get(`/cards/${cardId}/sensitive`);
+      return { pan: data.pan, cvv: data.cvv };
+    });
+  }
+
   // ----------------------------------------------------- Webhook signature
 
   verifyWebhookSignature(rawBody: Buffer, signatureHeader: string | undefined): boolean {

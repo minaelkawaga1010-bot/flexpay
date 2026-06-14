@@ -100,13 +100,26 @@
     "balance": "Balance",
     "cardholder": "Cardholder",
     "expires": "Expires",
+    "cvv": "CVV",
     "blocked_message": "Card temporarily blocked",
     "status": {
       "blocked": "Blocked",
-      "active": "Active"
+      "active": "Active",
+      "inactive": "Inactive",
+      "frozen": "Frozen",
+      "expired": "Expired",
+      "replaced": "Replaced"
     },
     "no_card": "No virtual card yet",
-    "order_physical": "Order physical card"
+    "order_physical": "Order physical card",
+    "reveal_details": "Reveal card details",
+    "hide_details": "Hide card details",
+    "revealing": "Authenticating…",
+    "auto_clear_in": "Auto-hides in {{seconds}}s",
+    "freeze": "Freeze card",
+    "frozen_subtitle": "Card is frozen — no new transactions allowed",
+    "active_subtitle": "Card is active and ready to spend",
+    "compliance_badge": "Spend instrument · linked to your SVF wallet (not a WPS payee)"
   },
   "transactions": {
     "DEPOSIT": "Deposit",
