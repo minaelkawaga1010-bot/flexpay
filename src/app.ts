@@ -28,6 +28,7 @@ import { mobileWalletController } from '@modules/mobile-api/wallet.controller';
 import { reportsController } from '@modules/ops-intel/reports.controller';
 import { payrollIngestionController } from '@modules/payroll-ingestion/payroll-ingestion.controller';
 import { billPaymentController } from '@modules/bill-payment/bill-payment.controller';
+import { aiOffersController } from '@modules/offers/ai-offers.controller';
 
 // Webhooks
 import { nymCardCardWebhook } from '@webhooks/nymcard-card.webhook';
@@ -138,6 +139,10 @@ app.use(`${env.API_PREFIX}/admin/payroll`, payrollIngestionController.router);
 // Free Bills — bill-payment surface. Idempotency middleware applied
 // inside the controller on POST /bills/pay so list/get stay cheap.
 app.use(`${env.API_PREFIX}/bills`, billPaymentController.router);
+// AI Offers — Tool 11-firewalled, LLM-ranked personalised feed.
+// Mounted on a distinct path so firewall-specific status codes
+// (403/451) don't leak to the editorial /offers surface.
+app.use(`${env.API_PREFIX}/ai/offers`, aiOffersController.router);
 
 // =====================================================================
 // 404 + error handlers (last)

@@ -50,6 +50,30 @@
     "savings": "Savings",
     "recent_transactions": "Recent activity"
   },
+  "ai_offers": {
+    "title": "Offers for you",
+    "subtitle": "Personalised by AI from your salary and spending patterns. No raw personal data leaves the safety boundary.",
+    "firewall_badge": "Tool 11 · Prompt Firewall Secured",
+    "empty_title": "No personalised offers yet",
+    "empty_subtitle": "Once your salary settles we'll surface a few tailored picks here.",
+    "offer_label": "Offer",
+    "claim": "Claim offer",
+    "claiming": "Claiming…",
+    "retry": "Try again",
+    "error_title": "Couldn't load offers",
+    "error_body": "Pull to refresh or tap retry.",
+    "category": {
+      "telecom": "Telecom",
+      "remittance": "Remittance",
+      "groceries": "Groceries"
+    },
+    "firewall_blocked": {
+      "injection_title": "Request refused by our safety policy",
+      "injection_body": "We refused to generate personalised offers for this request. If you believe this is a mistake, contact support.",
+      "unavailable_title": "Offers paused for safety check",
+      "unavailable_body": "Our prompt-injection safety service is being restored. Offers will be back shortly."
+    }
+  },
   "bills": {
     "title": "Pay a bill",
     "subtitle": "Settle UAE utility, telecom, and government bills from your wallet — zero service fee.",
