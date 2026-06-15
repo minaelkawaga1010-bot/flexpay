@@ -50,6 +50,69 @@
     "savings": "Savings",
     "recent_transactions": "Recent activity"
   },
+  "ai_offers": {
+    "title": "Offers for you",
+    "subtitle": "Personalised by AI from your salary and spending patterns. No raw personal data leaves the safety boundary.",
+    "firewall_badge": "Tool 11 · Prompt Firewall Secured",
+    "empty_title": "No personalised offers yet",
+    "empty_subtitle": "Once your salary settles we'll surface a few tailored picks here.",
+    "offer_label": "Offer",
+    "claim": "Claim offer",
+    "claiming": "Claiming…",
+    "retry": "Try again",
+    "error_title": "Couldn't load offers",
+    "error_body": "Pull to refresh or tap retry.",
+    "category": {
+      "telecom": "Telecom",
+      "remittance": "Remittance",
+      "groceries": "Groceries"
+    },
+    "firewall_blocked": {
+      "injection_title": "Request refused by our safety policy",
+      "injection_body": "We refused to generate personalised offers for this request. If you believe this is a mistake, contact support.",
+      "unavailable_title": "Offers paused for safety check",
+      "unavailable_body": "Our prompt-injection safety service is being restored. Offers will be back shortly."
+    }
+  },
+  "bills": {
+    "title": "Pay a bill",
+    "subtitle": "Settle UAE utility, telecom, and government bills from your wallet — zero service fee.",
+    "choose_biller": "Choose biller",
+    "account_ref_label": "Account reference",
+    "amount_label": "Amount (AED)",
+    "pay": "Review payment",
+    "cancel": "Cancel",
+    "confirm_pay": "Confirm payment",
+    "confirm_title": "Confirm bill payment",
+    "biller": "Biller",
+    "account": "Account",
+    "amount": "Amount",
+    "fee": "Service fee",
+    "status": "Status",
+    "status_PENDING": "Processing",
+    "status_COMPLETED": "Paid",
+    "status_FAILED": "Failed",
+    "status_REVERSED": "Reversed",
+    "receipt_title": "Payment in flight",
+    "receipt_subtitle": "We'll notify you once the biller confirms.",
+    "pay_another": "Pay another bill",
+    "error_title": "Couldn't process the bill",
+    "compliance_badge": "CBUAE Universal Account · wage-receipt wallet settlement"
+  },
+  "salary": {
+    "wallet_balance": "Salary wallet",
+    "cycle_accrued": "Earned this cycle",
+    "cycle_last_settled": "Last settled cycle",
+    "send": "Send",
+    "recent_wps_movements": "Recent wage movements",
+    "compliance_badge": "WPS · Universal Account",
+    "empty_title": "No wage movements yet",
+    "empty_subtitle": "Your next payroll credit will appear here once it settles.",
+    "status_pending": "Pending settlement",
+    "error_title": "Couldn't load wage history",
+    "error_body": "We hit a snag fetching your recent WPS movements. Pull to refresh or tap retry.",
+    "retry": "Try again"
+  },
   "wallet": {
     "balance": "Balance",
     "accrued_this_cycle": "Earned this cycle",
@@ -86,13 +149,26 @@
     "balance": "Balance",
     "cardholder": "Cardholder",
     "expires": "Expires",
+    "cvv": "CVV",
     "blocked_message": "Card temporarily blocked",
     "status": {
       "blocked": "Blocked",
-      "active": "Active"
+      "active": "Active",
+      "inactive": "Inactive",
+      "frozen": "Frozen",
+      "expired": "Expired",
+      "replaced": "Replaced"
     },
     "no_card": "No virtual card yet",
-    "order_physical": "Order physical card"
+    "order_physical": "Order physical card",
+    "reveal_details": "Reveal card details",
+    "hide_details": "Hide card details",
+    "revealing": "Authenticating…",
+    "auto_clear_in": "Auto-hides in {{seconds}}s",
+    "freeze": "Freeze card",
+    "frozen_subtitle": "Card is frozen — no new transactions allowed",
+    "active_subtitle": "Card is active and ready to spend",
+    "compliance_badge": "Spend instrument · linked to your SVF wallet (not a WPS payee)"
   },
   "transactions": {
     "DEPOSIT": "Deposit",

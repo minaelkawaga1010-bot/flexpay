@@ -62,18 +62,30 @@ interface StepUpState {
 }
 
 let resolvers: PendingResolvers | null = null;
+let watchdog: ReturnType<typeof setTimeout> | null = null;
 const CHALLENGE_TIMEOUT_MS = 4 * 60_000; // 4min — backend OTP is 5min; keep the modal 1min short
+
+/** Clear the watchdog timer so it can't accumulate across rapid challenges. */
+function clearWatchdog(): void {
+  if (watchdog !== null) {
+    clearTimeout(watchdog);
+    watchdog = null;
+  }
+}
 
 export const useStepUpStore = create<StepUpState>()(
   immer((set) => ({
     pending: null,
 
     enqueue: ({ purpose, hint }) => {
-      // Reject any pre-existing pending challenge with REPLACED.
+      // Reject any pre-existing pending challenge with REPLACED and
+      // clear its watchdog so timers don't accumulate across rapid
+      // re-challenges.
       if (resolvers) {
         resolvers.reject(new StepUpError('REPLACED'));
         resolvers = null;
       }
+      clearWatchdog();
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       set((s) => {
         s.pending = { id, purpose, hint, createdAt: Date.now() };
@@ -82,7 +94,8 @@ export const useStepUpStore = create<StepUpState>()(
       return new Promise<string>((resolve, reject) => {
         resolvers = { resolve, reject };
         // Watchdog: auto-cancel if the user never engages the modal.
-        setTimeout(() => {
+        watchdog = setTimeout(() => {
+          watchdog = null;
           if (resolvers && useStepUpStore.getState().pending?.id === id) {
             useStepUpStore.getState()._internalReject('TIMEOUT');
           }
@@ -93,6 +106,7 @@ export const useStepUpStore = create<StepUpState>()(
     submit: (code) => {
       const r = resolvers;
       resolvers = null;
+      clearWatchdog();
       set((s) => {
         s.pending = null;
       });
@@ -102,6 +116,7 @@ export const useStepUpStore = create<StepUpState>()(
     cancel: () => {
       const r = resolvers;
       resolvers = null;
+      clearWatchdog();
       set((s) => {
         s.pending = null;
       });
@@ -111,6 +126,7 @@ export const useStepUpStore = create<StepUpState>()(
     _internalReject: (reason) => {
       const r = resolvers;
       resolvers = null;
+      clearWatchdog();
       set((s) => {
         s.pending = null;
       });

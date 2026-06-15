@@ -4,6 +4,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { AppTabParamList, WalletStackParamList, CardsStackParamList } from '@/types/navigation';
 import { HomeScreen } from '@screens/home/HomeScreen';
 import { WalletScreen } from '@screens/wallet/WalletScreen';
+import { SalaryDashboardScreen } from '@screens/wallet/SalaryDashboardScreen';
 import { TransferScreen } from '@screens/wallet/TransferScreen';
 import { CardsScreen } from '@screens/cards/CardsScreen';
 import { OrderPhysicalCardScreen } from '@screens/cards/OrderPhysicalCardScreen';
@@ -17,6 +18,11 @@ const CardsStackNav = createNativeStackNavigator<CardsStackParamList>();
 const WalletStack = () => (
   <WalletStackNav.Navigator screenOptions={{ headerLargeTitle: true }}>
     <WalletStackNav.Screen name="WalletHome" component={WalletScreen} options={{ title: 'Wallet' }} />
+    <WalletStackNav.Screen
+      name="SalaryDashboard"
+      component={SalaryDashboardScreen}
+      options={{ title: 'Salary' }}
+    />
     <WalletStackNav.Screen name="Transfer" component={TransferScreen} options={{ title: 'Transfer' }} />
   </WalletStackNav.Navigator>
 );

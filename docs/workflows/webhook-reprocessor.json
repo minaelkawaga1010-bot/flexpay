@@ -1,0 +1,484 @@
+{
+  "name": "Webhook Reprocessor — Failed-Event DLQ State Machine",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "f2a4b1c2-2222-4002-9000-000000000001",
+      "name": "Cron — every 5 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1400, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Pull failed webhook deliveries from the audit_logs table that are\n-- (a) past their next-attempt-at watermark and\n-- (b) below the retry-budget terminal threshold (8 attempts).\n--\n-- Schema reference (see prisma/schema.prisma):\n--   audit_logs.action LIKE 'WEBHOOK_DELIVERY_FAILED_%'\n--   audit_logs.metadata JSONB carries:\n--     endpoint           (POST target URL — relative to FLEXPAY_API_BASE)\n--     payload            (the JSON body to replay)\n--     idempotencyKey     (the original delivery key — preserved across retries)\n--     attemptCount       (int — 0 on first failure, monotonically increasing)\n--     nextAttemptAt      (ISO timestamp — exponential backoff)\n--     firstFailedAt      (ISO timestamp — DLQ-clock anchor)\n--     status             (PENDING_RETRY | DLQ_TERMINAL | RESOLVED)\n--\n-- The reprocessor selects only PENDING_RETRY rows whose nextAttemptAt\n-- has elapsed and whose attemptCount is < the terminal ceiling. The\n-- LIMIT caps per-cycle work to keep the cron tick bounded.\nSELECT\n  id,\n  metadata ->> 'endpoint'                                  AS endpoint,\n  (metadata ->> 'attemptCount')::int                       AS attempt_count,\n  (metadata ->> 'nextAttemptAt')::timestamptz              AS next_attempt_at,\n  (metadata ->> 'firstFailedAt')::timestamptz              AS first_failed_at,\n  metadata ->> 'idempotencyKey'                            AS idempotency_key,\n  metadata -> 'payload'                                    AS payload,\n  action\nFROM audit_logs\nWHERE action LIKE 'WEBHOOK_DELIVERY_FAILED_%'\n  AND COALESCE(metadata ->> 'status', 'PENDING_RETRY') = 'PENDING_RETRY'\n  AND (metadata ->> 'attemptCount')::int < 8\n  AND (metadata ->> 'nextAttemptAt')::timestamptz <= NOW()\nORDER BY (metadata ->> 'nextAttemptAt')::timestamptz ASC\nLIMIT 50;",
+        "options": {}
+      },
+      "id": "f2a4b1c2-2222-4002-9000-000000000002",
+      "name": "Query Failed Webhook Events",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [-1180, 0],
+      "credentials": {
+        "postgres": {
+          "id": "flexpay-postgres",
+          "name": "FlexPay Postgres (read+write)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "f2a4b1c2-2222-4002-9000-000000000003",
+      "name": "Loop — one event per iteration",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-960, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// HMAC-SHA256 over the canonical (compact) JSON serialisation of\n// the payload. The receiving Express webhooks read the raw body and\n// compute the HMAC themselves — replaying with the SAME canonical\n// bytes is the only way the signature gate will pass.\n//\n// The original webhook fired by NymCard / MoneyHash / the biller rail\n// was signed by THEIR secret; we cannot reproduce that. The receiving\n// FlexPay webhook endpoints accept a replay-mode signature signed by\n// the REPROCESSOR'S key under env.WEBHOOK_REPLAY_SECRET (see\n// src/webhooks/*.webhook.ts → verifySignature). Either-or check:\n// upstream provider signature OR the reprocessor's signature is\n// honoured, never both.\nconst crypto = require('crypto');\nconst item = items[0].json;\n\nconst payload = item.payload;\nif (!payload) throw new Error('REPROCESSOR_PAYLOAD_MISSING');\n\n// Canonical JSON. JSON.stringify with no spacing matches what the\n// backend's HMAC computation sees on the wire.\nconst body = JSON.stringify(payload);\n\nconst secret = $env.WEBHOOK_REPLAY_SECRET;\nif (!secret) throw new Error('WEBHOOK_REPLAY_SECRET_NOT_SET');\n\nconst signature = crypto\n  .createHmac('sha256', secret)\n  .update(body, 'utf8')\n  .digest('hex');\n\nreturn [{\n  json: {\n    ...item,\n    body,\n    signature,\n    // Header name the FlexPay webhook handlers look at first when\n    // running in replay mode. The signing key is rotated\n    // independently of partner secrets.\n    signatureHeader: 'x-flexpay-replay-signature',\n  },\n}];"
+      },
+      "id": "f2a4b1c2-2222-4002-9000-000000000004",
+      "name": "Compute Replay HMAC",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-740, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$vars.FLEXPAY_API_BASE}}{{$json.endpoint}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{$json.idempotency_key}}"
+            },
+            {
+              "name": "={{$json.signatureHeader}}",
+              "value": "={{$json.signature}}"
+            },
+            {
+              "name": "X-Replay-Attempt",
+              "value": "={{$json.attempt_count + 1}}"
+            },
+            {
+              "name": "X-Workflow-Execution",
+              "value": "={{$execution.id}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$json.body}}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          }
+        }
+      },
+      "id": "f2a4b1c2-2222-4002-9000-000000000005",
+      "name": "Replay POST to Backend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-520, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "ok",
+              "leftValue": "={{$json.statusCode}}",
+              "rightValue": 300,
+              "operator": {
+                "type": "number",
+                "operation": "smaller"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f2a4b1c2-2222-4002-9000-000000000006",
+      "name": "IF 2xx?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-300, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// State-machine reducer — applied to every replay outcome.\n//\n// Inputs (the upstream Replay POST result + the row from the cron\n// query):\n//   statusCode             HTTP code from the FlexPay endpoint\n//   attempt_count          attempts so far (0 == first failure)\n//   first_failed_at        ISO timestamp of the first failure\n//   idempotency_key        unchanged across retries\n//\n// Outputs:\n//   nextStatus       PENDING_RETRY | RESOLVED | DLQ_TERMINAL\n//   nextAttemptAt    ISO timestamp the cron should consider this row\n//                    again. For RESOLVED / DLQ_TERMINAL this is null.\n//   nextAttemptCount monotonically incremented; capped at 8.\n//\n// Exponential backoff with jitter (Bible §3.5 retry curve):\n//   attempt 1  →  1 min\n//   attempt 2  →  2 min\n//   attempt 3  →  4 min\n//   attempt 4  →  8 min\n//   attempt 5  →  16 min\n//   attempt 6  →  32 min\n//   attempt 7  →  64 min\n//   attempt 8  →  128 min  (terminal if it fails)\n// 25% multiplicative jitter to spread thundering herds.\n//\n// 2xx  → RESOLVED, no further retries.\n// 4xx (non-401)  → DLQ_TERMINAL immediately. 4xx is a contract\n//   violation, not a transient error; retrying will not change the\n//   outcome and pages the on-call.\n// 401 (signature)  → DLQ_TERMINAL with a distinguishing reason —\n//   means the WEBHOOK_REPLAY_SECRET is mis-set on one side. Human\n//   intervention required; do not retry blindly.\n// 5xx / network  → PENDING_RETRY, schedule next attempt.\nconst replay = items[0].json;\nconst statusCode = replay.statusCode;\nconst attemptCount = (replay.attempt_count ?? 0) + 1;\n\nconst BASE_MS = 60 * 1000;\nconst CAP_ATTEMPTS = 8;\n\nfunction backoff(n) {\n  const exp = Math.min(n, CAP_ATTEMPTS);\n  const window = BASE_MS * Math.pow(2, Math.max(0, exp - 1));\n  const jitter = 1 + (Math.random() * 0.25 - 0.125);\n  return Math.round(window * jitter);\n}\n\nlet nextStatus;\nlet nextAttemptAt = null;\nlet dlqReason = null;\n\nif (statusCode >= 200 && statusCode < 300) {\n  nextStatus = 'RESOLVED';\n} else if (statusCode === 401) {\n  nextStatus = 'DLQ_TERMINAL';\n  dlqReason = 'replay_signature_rejected';\n} else if (statusCode >= 400 && statusCode < 500) {\n  // 4xx that isn't a signature issue means the backend has rejected\n  // the payload semantically. Replays will keep rejecting. Page now.\n  nextStatus = 'DLQ_TERMINAL';\n  dlqReason = `backend_${statusCode}`;\n} else if (attemptCount >= CAP_ATTEMPTS) {\n  // Retry budget exhausted.\n  nextStatus = 'DLQ_TERMINAL';\n  dlqReason = 'retry_budget_exhausted';\n} else {\n  nextStatus = 'PENDING_RETRY';\n  nextAttemptAt = new Date(Date.now() + backoff(attemptCount)).toISOString();\n}\n\nreturn [{\n  json: {\n    id: replay.id,\n    nextStatus,\n    nextAttemptCount: attemptCount,\n    nextAttemptAt,\n    dlqReason,\n    statusCode,\n    idempotency_key: replay.idempotency_key,\n    endpoint: replay.endpoint,\n    first_failed_at: replay.first_failed_at,\n    action: replay.action,\n  },\n}];"
+      },
+      "id": "f2a4b1c2-2222-4002-9000-000000000007",
+      "name": "DLQ State-Machine Reducer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-80, 180]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Persist the state-machine verdict for the failed-event row.\n-- We update metadata JSONB in-place; the audit_log row itself is\n-- append-only, but the metadata.status flag is the reprocessor's\n-- single source of truth for whether to re-emit this event next tick.\nUPDATE audit_logs\nSET metadata = jsonb_set(\n  jsonb_set(\n    jsonb_set(\n      jsonb_set(\n        COALESCE(metadata, '{}'::jsonb),\n        '{status}',         to_jsonb($2::text), true),\n      '{attemptCount}',     to_jsonb($3::int),  true),\n    '{nextAttemptAt}',      COALESCE(to_jsonb($4::text), 'null'::jsonb), true),\n  '{dlqReason}',            COALESCE(to_jsonb($5::text), 'null'::jsonb), true)\nWHERE id = $1::text;",
+        "options": {
+          "queryReplacement": "={{$json.id}},={{$json.nextStatus}},={{$json.nextAttemptCount}},={{$json.nextAttemptAt}},={{$json.dlqReason}}"
+        }
+      },
+      "id": "f2a4b1c2-2222-4002-9000-000000000008",
+      "name": "Persist Reducer Verdict",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [140, 180],
+      "credentials": {
+        "postgres": {
+          "id": "flexpay-postgres",
+          "name": "FlexPay Postgres (read+write)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- 2xx replay — mark the audit row RESOLVED and log a follow-up\n-- audit entry so the resolution is traceable.\nUPDATE audit_logs\nSET metadata = jsonb_set(\n  COALESCE(metadata, '{}'::jsonb),\n  '{status}', '\"RESOLVED\"'::jsonb, true)\nWHERE id = $1::text;\n\nINSERT INTO audit_logs (id, \"actorType\", \"actorId\", action, \"resourceType\", \"resourceId\", metadata, \"createdAt\")\nVALUES (\n  gen_random_uuid()::text,\n  'system',\n  'workflow:webhook-reprocessor',\n  'WEBHOOK_REPLAY_RESOLVED',\n  'AuditLog',\n  $1::text,\n  jsonb_build_object(\n    'endpoint',        $2::text,\n    'idempotencyKey',  $3::text,\n    'attemptCount',    $4::int,\n    'statusCode',      $5::int\n  ),\n  NOW()\n);",
+        "options": {
+          "queryReplacement": "={{$json.id}},={{$json.endpoint}},={{$json.idempotency_key}},={{$json.attempt_count + 1}},={{$json.statusCode}}"
+        }
+      },
+      "id": "f2a4b1c2-2222-4002-9000-000000000009",
+      "name": "Mark RESOLVED + Audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [-80, -180],
+      "credentials": {
+        "postgres": {
+          "id": "flexpay-postgres",
+          "name": "FlexPay Postgres (read+write)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "dlq",
+              "leftValue": "={{$json.nextStatus}}",
+              "rightValue": "DLQ_TERMINAL",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f2a4b1c2-2222-4002-9000-000000000010",
+      "name": "IF DLQ_TERMINAL?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [360, 180]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{$vars.SLACK_PAGER_CHANNEL_ID}}",
+          "mode": "id"
+        },
+        "text": "=:rotating_light: *Webhook DLQ — terminal* \\nEvent id: `{{$json.id}}`\\nEndpoint: `{{$json.endpoint}}`\\nIdempotency-Key: `{{$json.idempotency_key}}`\\nReason: `{{$json.dlqReason}}`\\nFinal status: `{{$json.statusCode}}` after `{{$json.nextAttemptCount}}` attempt(s)\\nFirst failure: `{{$json.first_failed_at}}`\\n_Action required: triage the failed delivery in the admin dashboard and either RESOLVE manually or REJECT permanently._",
+        "otherOptions": {}
+      },
+      "id": "f2a4b1c2-2222-4002-9000-000000000011",
+      "name": "Slack — Pager (DLQ Terminal)",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [580, 80],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-flexpay-ops",
+          "name": "Slack — FlexPay Ops"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Loud-but-immutable DLQ audit. The metadata.status flag is the\n-- machine signal; this row is the human-facing trail. The on-call\n-- triages from the admin dashboard, which queries this action code.\nINSERT INTO audit_logs (id, \"actorType\", \"actorId\", action, \"resourceType\", \"resourceId\", metadata, \"createdAt\")\nVALUES (\n  gen_random_uuid()::text,\n  'system',\n  'workflow:webhook-reprocessor',\n  'WEBHOOK_DLQ_TERMINAL',\n  'AuditLog',\n  $1::text,\n  jsonb_build_object(\n    'endpoint',         $2::text,\n    'idempotencyKey',   $3::text,\n    'attemptCount',     $4::int,\n    'lastStatusCode',   $5::int,\n    'dlqReason',        $6::text,\n    'firstFailedAt',    $7::text,\n    'requiresHumanIntervention', true\n  ),\n  NOW()\n);",
+        "options": {
+          "queryReplacement": "={{$json.id}},={{$json.endpoint}},={{$json.idempotency_key}},={{$json.nextAttemptCount}},={{$json.statusCode}},={{$json.dlqReason}},={{$json.first_failed_at}}"
+        }
+      },
+      "id": "f2a4b1c2-2222-4002-9000-000000000012",
+      "name": "Audit DLQ_TERMINAL",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [580, 280],
+      "credentials": {
+        "postgres": {
+          "id": "flexpay-postgres",
+          "name": "FlexPay Postgres (read+write)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Tail of the iteration — loop SplitInBatches back around. No\n// per-iteration data shape needed; the SplitInBatches node manages\n// continuation off its `done` output.\nreturn items;"
+      },
+      "id": "f2a4b1c2-2222-4002-9000-000000000013",
+      "name": "Iteration Tail",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [800, 180]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- End-of-tick rollup: how many events did we move through the\n-- state machine? A single SUMMARY audit row per cron tick keeps the\n-- post-mortem trail searchable without flooding the table.\n--\n-- The numbers come from a window scoped to the past 15 minutes\n-- (3x the tick interval so consecutive ticks overlap and a single\n-- dropped tick doesn't blind the dashboard).\nINSERT INTO audit_logs (id, \"actorType\", \"actorId\", action, \"resourceType\", \"resourceId\", metadata, \"createdAt\")\nVALUES (\n  gen_random_uuid()::text,\n  'system',\n  'workflow:webhook-reprocessor',\n  'WEBHOOK_REPROCESSOR_TICK_SUMMARY',\n  'System',\n  'webhook-reprocessor',\n  jsonb_build_object(\n    'pendingRetry', (\n      SELECT COUNT(*) FROM audit_logs\n      WHERE action LIKE 'WEBHOOK_DELIVERY_FAILED_%'\n        AND COALESCE(metadata ->> 'status','PENDING_RETRY') = 'PENDING_RETRY'\n        AND \"createdAt\" >= NOW() - INTERVAL '15 minutes'\n    ),\n    'resolvedSinceLastTick', (\n      SELECT COUNT(*) FROM audit_logs\n      WHERE action = 'WEBHOOK_REPLAY_RESOLVED'\n        AND \"createdAt\" >= NOW() - INTERVAL '15 minutes'\n    ),\n    'dlqTerminalSinceLastTick', (\n      SELECT COUNT(*) FROM audit_logs\n      WHERE action = 'WEBHOOK_DLQ_TERMINAL'\n        AND \"createdAt\" >= NOW() - INTERVAL '15 minutes'\n    )\n  ),\n  NOW()\n);",
+        "options": {}
+      },
+      "id": "f2a4b1c2-2222-4002-9000-000000000014",
+      "name": "Tick Summary Audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1020, 0],
+      "credentials": {
+        "postgres": {
+          "id": "flexpay-postgres",
+          "name": "FlexPay Postgres (read+write)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Cron — every 5 min": {
+      "main": [
+        [
+          {
+            "node": "Query Failed Webhook Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Failed Webhook Events": {
+      "main": [
+        [
+          {
+            "node": "Loop — one event per iteration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop — one event per iteration": {
+      "main": [
+        [
+          {
+            "node": "Tick Summary Audit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Compute Replay HMAC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Replay HMAC": {
+      "main": [
+        [
+          {
+            "node": "Replay POST to Backend",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Replay POST to Backend": {
+      "main": [
+        [
+          {
+            "node": "IF 2xx?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF 2xx?": {
+      "main": [
+        [
+          {
+            "node": "Mark RESOLVED + Audit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "DLQ State-Machine Reducer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark RESOLVED + Audit": {
+      "main": [
+        [
+          {
+            "node": "Iteration Tail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DLQ State-Machine Reducer": {
+      "main": [
+        [
+          {
+            "node": "Persist Reducer Verdict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Reducer Verdict": {
+      "main": [
+        [
+          {
+            "node": "IF DLQ_TERMINAL?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF DLQ_TERMINAL?": {
+      "main": [
+        [
+          {
+            "node": "Slack — Pager (DLQ Terminal)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Iteration Tail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack — Pager (DLQ Terminal)": {
+      "main": [
+        [
+          {
+            "node": "Audit DLQ_TERMINAL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audit DLQ_TERMINAL": {
+      "main": [
+        [
+          {
+            "node": "Iteration Tail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Iteration Tail": {
+      "main": [
+        [
+          {
+            "node": "Loop — one event per iteration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "timezone": "Asia/Dubai",
+    "errorWorkflow": "",
+    "callerPolicy": "workflowsFromSameOwner",
+    "executionTimeout": 600
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [
+    { "name": "flexpay" },
+    { "name": "reliability" },
+    { "name": "dlq" },
+    { "name": "production" }
+  ],
+  "pinData": {},
+  "versionId": "1.0.0",
+  "id": "wf-webhook-reprocessor"
+}

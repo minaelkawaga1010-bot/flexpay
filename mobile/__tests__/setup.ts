@@ -28,13 +28,21 @@ jest.mock('@react-native-firebase/messaging', () => ({
 jest.mock('@notifee/react-native', () => ({
   __esModule: true,
   default: {
-    displayNotification: jest.fn(),
-    createChannel: jest.fn(),
-    cancelAllNotifications: jest.fn(),
+    displayNotification: jest.fn().mockResolvedValue(undefined),
+    createChannel: jest.fn().mockResolvedValue(undefined),
+    cancelAllNotifications: jest.fn().mockResolvedValue(undefined),
     onForegroundEvent: jest.fn().mockReturnValue(() => {}),
+    onBackgroundEvent: jest.fn(),
   },
-  AndroidImportance: { HIGH: 4, DEFAULT: 3 },
-  EventType: { PRESS: 1 },
+  AndroidImportance: { HIGH: 4, DEFAULT: 3, LOW: 2 },
+  AndroidVisibility: { PRIVATE: 0, PUBLIC: 1, SECRET: -1 },
+  EventType: { PRESS: 1, DISMISSED: 0, ACTION_PRESS: 2 },
+}));
+
+jest.mock('react-native-localize', () => ({
+  getLocales: jest.fn().mockReturnValue([
+    { countryCode: 'AE', languageCode: 'en', languageTag: 'en-AE', isRTL: false },
+  ]),
 }));
 
 jest.mock('react-native-haptic-feedback', () => ({

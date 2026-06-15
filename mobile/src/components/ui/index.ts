@@ -4,3 +4,4 @@ export { Text } from './Text';
 export { Card } from './Card';
 export { LoadingSpinner } from './LoadingSpinner';
 export { EmptyState } from './EmptyState';
+export { Skeleton, SkeletonCard } from './Skeleton';

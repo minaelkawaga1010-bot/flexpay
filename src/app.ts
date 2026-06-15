@@ -27,12 +27,15 @@ import { notificationsController } from '@modules/notifications/notification.con
 import { mobileWalletController } from '@modules/mobile-api/wallet.controller';
 import { reportsController } from '@modules/ops-intel/reports.controller';
 import { payrollIngestionController } from '@modules/payroll-ingestion/payroll-ingestion.controller';
+import { billPaymentController } from '@modules/bill-payment/bill-payment.controller';
+import { aiOffersController } from '@modules/offers/ai-offers.controller';
 
 // Webhooks
 import { nymCardCardWebhook } from '@webhooks/nymcard-card.webhook';
 import { nymCardAuthorizeWebhook } from '@webhooks/nymcard-authorize.webhook';
 import { moneyHashRemittanceWebhook } from '@webhooks/moneyhash-remittance.webhook';
 import { flexxpayWebhook } from '@webhooks/flexxpay.webhook';
+import { billerWebhook } from '@webhooks/biller.webhook';
 
 export const app = express();
 
@@ -64,6 +67,7 @@ app.use('/webhooks/nymcard', express.raw({ type: 'application/json', limit: '1mb
 app.use('/webhooks/nymcard', express.raw({ type: 'application/json', limit: '1mb' }), nymCardCardWebhook.router);
 app.use('/webhooks/moneyhash', express.raw({ type: 'application/json', limit: '1mb' }), moneyHashRemittanceWebhook.router);
 app.use('/webhooks/flexxpay', express.raw({ type: 'application/json', limit: '1mb' }), flexxpayWebhook.router);
+app.use('/webhooks/biller', express.raw({ type: 'application/json', limit: '1mb' }), billerWebhook.router);
 
 // =====================================================================
 // Body parsing + logging + compression
@@ -132,6 +136,13 @@ app.use(`${env.API_PREFIX}/admin/reports`, reportsController.router);
 // MOHRE SIF (Salary Information File) ingestion. Raw-body endpoint
 // scoped to admin role. See src/modules/payroll-ingestion/.
 app.use(`${env.API_PREFIX}/admin/payroll`, payrollIngestionController.router);
+// Free Bills — bill-payment surface. Idempotency middleware applied
+// inside the controller on POST /bills/pay so list/get stay cheap.
+app.use(`${env.API_PREFIX}/bills`, billPaymentController.router);
+// AI Offers — Tool 11-firewalled, LLM-ranked personalised feed.
+// Mounted on a distinct path so firewall-specific status codes
+// (403/451) don't leak to the editorial /offers surface.
+app.use(`${env.API_PREFIX}/ai/offers`, aiOffersController.router);
 
 // =====================================================================
 // 404 + error handlers (last)
