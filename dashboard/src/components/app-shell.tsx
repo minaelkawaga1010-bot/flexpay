@@ -12,6 +12,7 @@ import {
 import { SidebarNav } from "@/components/sidebar-nav";
 import { useAppStore } from "@/store/app-store";
 import { Separator } from "@/components/ui/separator";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { activeTab } = useAppStore();
@@ -33,11 +34,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               {formatTabLabel(activeTab)}
             </span>
           </div>
-          <div className="ml-auto flex items-center gap-2">
-            <div className="flex size-2 items-center justify-center rounded-full bg-emerald-500">
-              <span className="sr-only">Connected</span>
+          <div className="ml-auto flex items-center gap-3">
+            <div
+              className="flex items-center gap-1.5"
+              role="status"
+              aria-live="polite"
+              aria-label="Connection status: connected"
+            >
+              <span className="relative flex size-2">
+                <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+                <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+              </span>
+              <span className="text-xs text-muted-foreground">AED</span>
             </div>
-            <span className="text-xs text-muted-foreground">AED</span>
+            <Separator orientation="vertical" className="h-4" />
+            <ThemeToggle />
           </div>
         </header>
         <main className="flex-1 p-4 sm:p-6">{children}</main>

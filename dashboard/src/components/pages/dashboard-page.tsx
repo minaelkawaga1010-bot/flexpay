@@ -568,7 +568,7 @@ export function DashboardPage() {
 
         {/* Monthly Income */}
         <motion.div variants={fadeUp} custom={2}>
-          <Card className="border-emerald-100 py-0 transition-shadow hover:shadow-md dark:border-emerald-900/50">
+          <Card className="card-interactive border-emerald-100 py-0 dark:border-emerald-900/50">
             <CardContent className="p-5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
@@ -599,7 +599,7 @@ export function DashboardPage() {
 
         {/* Monthly Spent */}
         <motion.div variants={fadeUp} custom={3}>
-          <Card className="border-emerald-100 py-0 transition-shadow hover:shadow-md dark:border-emerald-900/50">
+          <Card className="card-interactive border-emerald-100 py-0 dark:border-emerald-900/50">
             <CardContent className="p-5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
@@ -630,7 +630,7 @@ export function DashboardPage() {
 
         {/* Pending Transactions */}
         <motion.div variants={fadeUp} custom={4}>
-          <Card className="border-emerald-100 py-0 transition-shadow hover:shadow-md dark:border-emerald-900/50">
+          <Card className="card-interactive border-emerald-100 py-0 dark:border-emerald-900/50">
             <CardContent className="p-5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">

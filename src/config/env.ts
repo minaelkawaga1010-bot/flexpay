@@ -62,6 +62,15 @@ const envSchema = z.object({
   // dev/test a static key is acceptable. Optional so unit tests that
   // never touch crypto still boot.
   PII_DATA_KEY: z.string().optional(),
+  // AWS KMS envelope unwrap (production DEK source). At boot the infra
+  // layer calls KMS Decrypt on KMS_WRAPPED_DEK (a base64 KMS ciphertext
+  // blob) and holds the plaintext 32-byte DEK in memory — KMS is never
+  // on the hot path. In production these MUST be set or the app
+  // fail-closes at boot; in development a MockKeyProvider fallback is
+  // used only when they are absent.
+  AWS_REGION: z.string().optional(),
+  KMS_KEY_ID: z.string().optional(),
+  KMS_WRAPPED_DEK: z.string().optional(),
   // Optional pepper appended before hashing Emirates IDs. Leaving it
   // unset yields the Bible's plain SHA-256 (cross-system comparable);
   // setting it hardens against rainbow-table attacks at the cost of

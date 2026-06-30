@@ -10,11 +10,19 @@ import { startNotificationWorker } from '@modules/notifications/notification.job
 import { registerCronJobs } from '@modules/savings/savings.job';
 import { setPromptFirewall } from '@shared/security/prompt-firewall';
 import { buildPromptFirewallDeps } from '@shared/security/prompt-firewall-impl';
+import { initialiseKeyProvider } from '@shared/security/pii-crypto';
 
 async function startServer(): Promise<void> {
   try {
     await prisma.$connect();
     await redisService.connect();
+
+    // PII key provider (Bible §5.2). Unwrap the DEK via AWS KMS in
+    // production; MockKeyProvider only in development when KMS is
+    // absent. A KMS handshake failure throws here and is caught by the
+    // outer catch → process exits (secure-close) rather than serving
+    // with no usable encryption key.
+    await initialiseKeyProvider();
 
     // Tool 11 — bind the prompt-injection firewall (Bible §5.3.6).
     // HTTP adapters when PRESIDIO_URL / INJECTION_CLASSIFIER_URL are

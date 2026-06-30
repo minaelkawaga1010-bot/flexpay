@@ -1,44 +1,112 @@
-version: '3.8'
+# ─────────────────────────────────────────────────────────────────────
+# FlexPay — production-leaning local / staging stack
+#
+# PostgreSQL 16 + Redis 7 (single primary) + RedisInsight. Both stores
+# carry health checks so dependents can gate on `service_healthy`.
+#
+# Secrets are env-driven with a dev-only fallback (`securepass`) that
+# matches the default DATABASE_URL in src/config/env.ts — so existing
+# local workflows keep working untouched. In staging/production, set
+# POSTGRES_PASSWORD in the environment (or an .env file) to override.
+#
+# Usage:
+#   POSTGRES_PASSWORD=… docker compose up -d
+#   docker compose ps          # both should report (healthy)
+#
+# Connection strings:
+#   DATABASE_URL=postgresql://flexpay:${POSTGRES_PASSWORD}@localhost:5432/flexpay?schema=public
+#   REDIS_URL=redis://localhost:6379
+#
+# Redis hosts idempotency keys + rate-limit counters + OTP + step-up,
+# so it is configured noeviction + appendonly: a dropped idempotency
+# key could permit a duplicate charge, which we never tolerate.
+# ─────────────────────────────────────────────────────────────────────
 
 services:
   postgres:
-    image: postgres:15-alpine
+    image: postgres:16-alpine
     container_name: flexpay-postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: flexpay
-      POSTGRES_PASSWORD: securepass
-      POSTGRES_DB: flexpay
+      POSTGRES_USER: ${POSTGRES_USER:-flexpay}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-securepass}
+      POSTGRES_DB: ${POSTGRES_DB:-flexpay}
+      POSTGRES_INITDB_ARGS: "--data-checksums --encoding=UTF8"
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=100"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "work_mem=8MB"
+      - "-c"
+      - "maintenance_work_mem=128MB"
+      - "-c"
+      - "effective_cache_size=768MB"
+      - "-c"
+      - "wal_level=replica"
+      - "-c"
+      - "max_wal_size=1GB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "random_page_cost=1.1"
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U flexpay"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flexpay} -d ${POSTGRES_DB:-flexpay}"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
 
   redis:
     image: redis:7-alpine
     container_name: flexpay-redis
+    restart: unless-stopped
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--appendfsync"
+      - "everysec"
+      - "--maxmemory"
+      - "256mb"
+      - "--maxmemory-policy"
+      - "noeviction"
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
-      timeout: 5s
+      timeout: 3s
       retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 384m
 
   redis-insight:
     image: redis/redisinsight:latest
     container_name: flexpay-redis-insight
+    restart: unless-stopped
     ports:
       - "8001:8001"
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
 
 volumes:
   postgres_data:
