@@ -44,7 +44,11 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "no-useless-escape": "off",
   },
 }, {
-  ignores: ["node_modules/**", ".next/**", "out/**", "build/**", "next-env.d.ts", "examples/**", "skills"]
+  // src/generated/** is the Prisma client emitted by `prisma generate`
+  // (isolated output path). Linting generated code is never useful and
+  // accounts for the bulk of the baseline errors (no-this-alias,
+  // no-empty-object-type, no-unused-expressions are all its signature).
+  ignores: ["node_modules/**", ".next/**", "out/**", "build/**", "next-env.d.ts", "examples/**", "skills", "src/generated/**"]
 }];
 
 export default eslintConfig;
