@@ -5,6 +5,21 @@ import { db } from '@/lib/db';
 const DEMO_PHONE = '+971501234567';
 
 /**
+ * Thrown inside the transfer transaction when the atomic, guarded debit
+ * fails to affect exactly one row — i.e. the sender's balance dropped
+ * below the requested amount between the pre-flight check and the write
+ * (a concurrent transfer won the race). Throwing rolls the whole
+ * transaction back; the outer handler maps it to a clean 400 rather
+ * than a 500.
+ */
+class InsufficientBalanceError extends Error {
+  constructor() {
+    super('Insufficient balance');
+    this.name = 'InsufficientBalanceError';
+  }
+}
+
+/**
  * Universal receipt hash — a deterministic, tamper-evident fingerprint
  * of a completed transfer. SHA-256 over the canonical, ordered field
  * set so the same transfer always yields the same hash and any change
@@ -99,16 +114,26 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      // Deduct from sender balance
-      await tx.balance.update({
+      // Atomic guarded debit. The `amount: { gte: amount }` predicate is
+      // evaluated by the database as part of the same UPDATE that
+      // decrements, so two concurrent transfers for the same sender
+      // cannot both pass — only one UPDATE will match the row while it
+      // still holds sufficient balance. `updateMany` (not `update`) is
+      // required because Prisma's `update.where` accepts only unique
+      // selectors, whereas this needs the non-unique `gte` guard.
+      // count !== 1 ⇒ the balance was insufficient at write time; throw
+      // to roll the whole transaction back.
+      const debit = await tx.balance.updateMany({
         where: {
-          walletId_currency: {
-            walletId: sender.wallet!.id,
-            currency: targetCurrency,
-          },
+          walletId: sender.wallet!.id,
+          currency: targetCurrency,
+          amount: { gte: amount },
         },
         data: { amount: { decrement: amount } },
       });
+      if (debit.count !== 1) {
+        throw new InsufficientBalanceError();
+      }
 
       // Add to receiver balance (find or create)
       const receiverBal = await tx.balance.findUnique({
@@ -185,6 +210,10 @@ export async function POST(request: NextRequest) {
       universalReceiptHash: receiptHash,
     });
   } catch (error) {
+    // A lost balance race is a client-actionable 400, not a server error.
+    if (error instanceof InsufficientBalanceError) {
+      return NextResponse.json({ error: 'Insufficient balance' }, { status: 400 });
+    }
     console.error('P2P Transfer error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
