@@ -463,6 +463,48 @@ export async function settleBillPayment(
   }
 
   return prisma.$transaction(async (tx: Prisma.TransactionClient): Promise<BillPayment> => {
+    // TASK-004: serialize against the refund path (both take WALLET_DEBIT)
+    // and re-read the bill UNDER the lock. The caller's `bill` snapshot
+    // was taken before the lock, so a concurrent refund may have moved
+    // the bill to a terminal state meanwhile; decide on the FRESH status
+    // to avoid marking COMPLETED a bill that was just FAILED + refunded
+    // (which would be a phantom credit / divergent terminal state).
+    await acquireWorkerLockScoped(tx, bill.employeeId, LockScope.WALLET_DEBIT);
+
+    const fresh = await tx.billPayment.findUnique({ where: { id: bill.id } });
+    if (!fresh) throw NotFound('Bill payment not found');
+
+    if (fresh.status === BillPaymentStatus.COMPLETED) {
+      // Another settle won the race — idempotent no-op.
+      return fresh;
+    }
+    if (fresh.status === BillPaymentStatus.FAILED || fresh.status === BillPaymentStatus.REVERSED) {
+      // A refund committed between the caller's snapshot and this lock.
+      // Surface the conflict for ops; do NOT reconcile (the wallet was
+      // already credited back).
+      logger.error('bill-payment: settle after concurrent terminal failure — ops review required', {
+        billPaymentId: bill.id,
+        currentStatus: fresh.status,
+        externalRef,
+      });
+      await tx.auditLog.create({
+        data: {
+          actorType: 'system',
+          actorId: 'webhook:biller',
+          action: 'BILL_PAYMENT_SUCCESS_AFTER_FAILURE_CONFLICT',
+          resourceType: 'BillPayment',
+          resourceId: bill.id,
+          metadata: {
+            externalRef,
+            currentStatus: fresh.status,
+            detectedUnderLock: true,
+          } as Prisma.InputJsonValue,
+        },
+      });
+      return fresh;
+    }
+
+    // fresh.status === PENDING → safe to settle.
     if (bill.walletTransactionId) {
       await tx.employeeTransaction.update({
         where: { id: bill.walletTransactionId },
