@@ -274,96 +274,150 @@ export async function refundFailedBill(
     return bill;
   }
 
-  // Second line of defence — idempotency on the refund row itself.
-  const existingRefund = await prisma.employeeTransaction.findUnique({
-    where: { idempotencyKey: refundIdempotencyKey(bill.idempotencyKey) },
+  const refundKey = refundIdempotencyKey(bill.idempotencyKey);
+
+  // Fast path (no transaction): an obvious prior refund — heal the bill
+  // row and return. Not the authoritative guard; the in-lock re-read and
+  // the unique constraint below are.
+  const prior = await prisma.employeeTransaction.findUnique({
+    where: { idempotencyKey: refundKey },
   });
-  if (existingRefund) {
-    // Refund already issued in a previous attempt; the bill row may
-    // have been left PENDING by a crashed prior call. Heal it now.
+  if (prior) {
     logger.info('bill-payment: refund already issued, healing bill row', {
       billPaymentId: bill.id,
-      refundId: existingRefund.id,
+      refundId: prior.id,
     });
     return prisma.billPayment.update({
       where: { id: bill.id },
       data: {
         status: BillPaymentStatus.FAILED,
         failureReason,
-        refundTransactionId: existingRefund.id,
+        refundTransactionId: prior.id,
         processedAt: new Date(),
         ...(externalRef ? { externalRef } : {}),
       },
     });
   }
 
-  return prisma.$transaction(
-    async (tx: Prisma.TransactionClient): Promise<BillPayment> => {
-      await acquireWorkerLockScoped(tx, bill.employeeId, LockScope.WALLET_DEBIT);
+  try {
+    return await prisma.$transaction(
+      async (tx: Prisma.TransactionClient): Promise<BillPayment> => {
+        await acquireWorkerLockScoped(tx, bill.employeeId, LockScope.WALLET_DEBIT);
 
-      // Mark the original PENDING wallet txn FAILED — status only,
-      // amounts are immutable (append-only invariant).
-      if (bill.walletTransactionId) {
-        await tx.employeeTransaction.update({
-          where: { id: bill.walletTransactionId },
-          data: { status: TransactionStatus.FAILED, processedAt: new Date() },
+        // Re-read UNDER the lock. A concurrent refund (e.g. the sync
+        // adapter-failure path racing the async biller webhook) that
+        // committed while we waited on the advisory lock is now visible
+        // → heal instead of inserting a duplicate that would trip the
+        // `bill:refund:<key>` unique index. This is the transactional
+        // guarantee that removes the P2002 under normal concurrency.
+        const existing = await tx.employeeTransaction.findUnique({
+          where: { idempotencyKey: refundKey },
+        });
+        if (existing) {
+          return tx.billPayment.update({
+            where: { id: bill.id },
+            data: {
+              status: BillPaymentStatus.FAILED,
+              failureReason,
+              refundTransactionId: existing.id,
+              processedAt: new Date(),
+              ...(externalRef ? { externalRef } : {}),
+            },
+          });
+        }
+
+        // Mark the original PENDING wallet txn FAILED — status only,
+        // amounts are immutable (append-only invariant).
+        if (bill.walletTransactionId) {
+          await tx.employeeTransaction.update({
+            where: { id: bill.walletTransactionId },
+            data: { status: TransactionStatus.FAILED, processedAt: new Date() },
+          });
+        }
+
+        const refundAmount = bill.totalAmount;
+        const refund = await tx.employeeTransaction.create({
+          data: {
+            employeeId: bill.employeeId,
+            type: TransactionType.REFUND,
+            amount: refundAmount,
+            fee: 0,
+            totalAmount: refundAmount,
+            currency: bill.currency,
+            status: TransactionStatus.COMPLETED,
+            description: `Refund for failed bill ${bill.billerType} (${bill.billerAccountRef}): ${failureReason}`,
+            reference: bill.id,
+            merchantName: bill.billerType,
+            merchantCategory: 'UTILITY',
+            idempotencyKey: refundKey,
+            processedAt: new Date(),
+          },
+        });
+
+        await tx.employee.update({
+          where: { id: bill.employeeId },
+          data: { walletBalance: { increment: refundAmount } },
+        });
+
+        const updated = await tx.billPayment.update({
+          where: { id: bill.id },
+          data: {
+            status: BillPaymentStatus.FAILED,
+            failureReason,
+            refundTransactionId: refund.id,
+            processedAt: new Date(),
+            ...(externalRef ? { externalRef } : {}),
+          },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            actorType: 'system',
+            actorId: 'bill-payment:refund',
+            action: 'BILL_PAYMENT_FAILED_AND_REFUNDED',
+            resourceType: 'BillPayment',
+            resourceId: bill.id,
+            metadata: {
+              refundId: refund.id,
+              refundAmount,
+              failureReason,
+            } as Prisma.InputJsonValue,
+          },
+        });
+
+        return updated;
+      },
+      { timeout: 30_000 },
+    );
+  } catch (err) {
+    // Database-uniqueness backstop. If a refund row appeared between the
+    // in-lock read and the insert (practically impossible while we hold
+    // the advisory lock, but the unique index is the ultimate guarantee),
+    // Prisma throws P2002. Treat it as an idempotent no-op: the money was
+    // credited exactly once by the winner; we only heal the bill row.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      const winner = await prisma.employeeTransaction.findUnique({
+        where: { idempotencyKey: refundKey },
+      });
+      if (winner) {
+        logger.info('bill-payment: refund P2002 race resolved as idempotent no-op', {
+          billPaymentId: bill.id,
+          refundId: winner.id,
+        });
+        return prisma.billPayment.update({
+          where: { id: bill.id },
+          data: {
+            status: BillPaymentStatus.FAILED,
+            failureReason,
+            refundTransactionId: winner.id,
+            processedAt: new Date(),
+            ...(externalRef ? { externalRef } : {}),
+          },
         });
       }
-
-      const refundAmount = bill.totalAmount;
-      const refund = await tx.employeeTransaction.create({
-        data: {
-          employeeId: bill.employeeId,
-          type: TransactionType.REFUND,
-          amount: refundAmount,
-          fee: 0,
-          totalAmount: refundAmount,
-          currency: bill.currency,
-          status: TransactionStatus.COMPLETED,
-          description: `Refund for failed bill ${bill.billerType} (${bill.billerAccountRef}): ${failureReason}`,
-          reference: bill.id,
-          merchantName: bill.billerType,
-          merchantCategory: 'UTILITY',
-          idempotencyKey: refundIdempotencyKey(bill.idempotencyKey),
-          processedAt: new Date(),
-        },
-      });
-
-      await tx.employee.update({
-        where: { id: bill.employeeId },
-        data: { walletBalance: { increment: refundAmount } },
-      });
-
-      const updated = await tx.billPayment.update({
-        where: { id: bill.id },
-        data: {
-          status: BillPaymentStatus.FAILED,
-          failureReason,
-          refundTransactionId: refund.id,
-          processedAt: new Date(),
-          ...(externalRef ? { externalRef } : {}),
-        },
-      });
-
-      await tx.auditLog.create({
-        data: {
-          actorType: 'system',
-          actorId: 'bill-payment:refund',
-          action: 'BILL_PAYMENT_FAILED_AND_REFUNDED',
-          resourceType: 'BillPayment',
-          resourceId: bill.id,
-          metadata: {
-            refundId: refund.id,
-            refundAmount,
-            failureReason,
-          } as Prisma.InputJsonValue,
-        },
-      });
-
-      return updated;
-    },
-    { timeout: 30_000 },
-  );
+    }
+    throw err;
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────

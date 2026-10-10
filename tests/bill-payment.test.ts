@@ -29,7 +29,7 @@ jest.mock('@config/prisma', () => {
   const tx = {
     employee: { findUnique: jest.fn(), update: jest.fn() },
     billPayment: { create: jest.fn(), update: jest.fn() },
-    employeeTransaction: { create: jest.fn(), update: jest.fn() },
+    employeeTransaction: { create: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
     auditLog: { create: jest.fn() },
   };
   return {
@@ -65,7 +65,7 @@ const mocked = prisma as unknown as {
   __tx: {
     employee: { findUnique: jest.Mock; update: jest.Mock };
     billPayment: { create: jest.Mock; update: jest.Mock };
-    employeeTransaction: { create: jest.Mock; update: jest.Mock };
+    employeeTransaction: { create: jest.Mock; update: jest.Mock; findUnique: jest.Mock };
     auditLog: { create: jest.Mock };
   };
 };
@@ -468,6 +468,53 @@ describe('refundFailedBill — idempotency', () => {
     expect(out.refundTransactionId).toBe('et-prior-refund');
     // No new tx — we only patched the bill row.
     expect(mocked.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('TASK-003: in-lock re-read heals a concurrent refund (pre-check null, but refund committed while awaiting the lock) — no duplicate create', async () => {
+    const pending = buildBillRow({ status: BillPaymentStatus.PENDING });
+    // Fast-path pre-check sees nothing...
+    mocked.employeeTransaction.findUnique.mockResolvedValue(null);
+    // ...but once inside the tx (after the advisory lock) a competing
+    // refund is now visible.
+    mocked.__tx.employeeTransaction.findUnique.mockResolvedValue({ id: 'et-winner' });
+    mocked.__tx.billPayment.update.mockResolvedValue(
+      buildBillRow({ status: BillPaymentStatus.FAILED, refundTransactionId: 'et-winner' }),
+    );
+
+    const out = await refundFailedBill(pending, 'race');
+
+    expect(mocked.$transaction).toHaveBeenCalledTimes(1);
+    expect(out.status).toBe(BillPaymentStatus.FAILED);
+    expect(out.refundTransactionId).toBe('et-winner');
+    // Critical: no second refund row was created (no double credit).
+    expect(mocked.__tx.employeeTransaction.create).not.toHaveBeenCalled();
+    expect(mocked.__tx.employee.update).not.toHaveBeenCalled();
+  });
+
+  it('TASK-003: P2002 backstop resolves a unique-violation race as an idempotent no-op (not a 500)', async () => {
+    const { Prisma } = jest.requireActual('@prisma/client');
+    const pending = buildBillRow({ status: BillPaymentStatus.PENDING });
+    mocked.employeeTransaction.findUnique
+      .mockResolvedValueOnce(null) // fast-path pre-check: nothing
+      .mockResolvedValueOnce({ id: 'et-winner' }); // post-catch lookup: the winner
+    mocked.__tx.employeeTransaction.findUnique.mockResolvedValue(null); // in-lock read: nothing
+    mocked.__tx.employeeTransaction.update.mockResolvedValue({});
+    // The insert loses the race → unique violation on bill:refund:<key>.
+    mocked.__tx.employeeTransaction.create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+      }),
+    );
+    mocked.billPayment.update.mockResolvedValue(
+      buildBillRow({ status: BillPaymentStatus.FAILED, refundTransactionId: 'et-winner' }),
+    );
+
+    const out = await refundFailedBill(pending, 'p2002-race');
+
+    // No throw; healed to FAILED pointing at the winner's refund.
+    expect(out.status).toBe(BillPaymentStatus.FAILED);
+    expect(out.refundTransactionId).toBe('et-winner');
   });
 });
 
