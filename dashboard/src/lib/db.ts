@@ -1,4 +1,5 @@
 import { PrismaClient } from '@/generated/prisma'
+import { resolveQueryLogLevels } from '@/lib/log-policy'
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
@@ -7,7 +8,10 @@ const globalForPrisma = globalThis as unknown as {
 export const db =
   globalForPrisma.prisma ??
   new PrismaClient({
-    log: ['query'],
+    // C-1: never `query` (it logs bound SQL params / PII). Gated on env
+    // via resolveQueryLogLevels — warn+error in development, error-only
+    // everywhere else. Preserves error-level observability.
+    log: resolveQueryLogLevels(),
   })
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
