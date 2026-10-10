@@ -2,6 +2,7 @@ import { Prisma, TransactionType } from '@prisma/client';
 import { prisma } from '@config/prisma';
 import { env } from '@config/env';
 import { BadRequest, Forbidden, NotFound } from '@shared/utils/errors';
+import { acquireWorkerLockScoped, LockScope } from '@shared/utils/advisory-lock';
 import { enqueueNotification } from '@modules/notifications/notification.job';
 import { referralsService } from '@modules/referrals/referrals.service';
 
@@ -94,6 +95,12 @@ export class WalletService {
     }
 
     return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      // TASK-002: serialize same-worker wallet debits under the shared
+      // WALLET_DEBIT scope (consistent with bill-payment). The sender
+      // balance is read AFTER the lock, so no competing WALLET_DEBIT
+      // holder can shift it between the read and the debit.
+      await acquireWorkerLockScoped(tx, senderId, LockScope.WALLET_DEBIT);
+
       const sender = await tx.employee.findFirst({ where: { id: senderId, status: 'ACTIVE' } });
       if (!sender) throw NotFound('SENDER_NOT_FOUND');
 
@@ -105,12 +112,24 @@ export class WalletService {
 
       const fee = sender.plan === 'LUXURY' ? 0 : env.P2P_TRANSFER_FEE;
       const total = amount + fee;
+      // Fast path: fail early on a clearly-insufficient balance without
+      // attempting the write. NOT the authoritative guard (the read is a
+      // snapshot) — the guarded update below is.
       if (sender.walletBalance < total) throw BadRequest('INSUFFICIENT_BALANCE');
 
-      await tx.employee.update({
-        where: { id: sender.id },
+      // Authoritative guarded debit. The `walletBalance >= total`
+      // predicate is evaluated by the database as part of the same
+      // UPDATE statement, so the balance can NEVER be driven negative —
+      // even by a competing debit path that does not take the advisory
+      // lock (remittance / cards / savings today, see TASK-002 notes).
+      // count !== 1 ⇒ insufficient balance at write time ⇒ throw to roll
+      // the whole transaction back.
+      const debit = await tx.employee.updateMany({
+        where: { id: sender.id, walletBalance: { gte: total } },
         data: { walletBalance: { decrement: total } },
       });
+      if (debit.count !== 1) throw BadRequest('INSUFFICIENT_BALANCE');
+
       await tx.employee.update({
         where: { id: recipient.id },
         data: { walletBalance: { increment: amount } },
