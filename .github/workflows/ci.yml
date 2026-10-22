@@ -56,8 +56,6 @@ jobs:
         working-directory: dashboard
     env:
       DATABASE_URL: 'file:./prisma/dev.db'
-      JWT_ACCESS_SECRET: ci-access-secret-must-be-at-least-32-chars-xx
-      JWT_REFRESH_SECRET: ci-refresh-secret-must-be-at-least-32-chars-x
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

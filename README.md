@@ -86,6 +86,9 @@ npm install
 
 # 2. Set environment
 cp .env.example .env
+#    JWT secrets have NO default: set JWT_ACCESS_SECRET and JWT_REFRESH_SECRET
+#    in .env to two different values, e.g. each from `openssl rand -hex 48`.
+#    The API refuses to start if either is missing, weak or a known value.
 
 # 3. Spin up Postgres + Redis
 npm run docker:up

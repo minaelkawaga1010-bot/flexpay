@@ -1,5 +1,8 @@
 import 'dotenv/config';
 import { z } from 'zod';
+import { jwtConfigIssues, parseTtlSeconds } from './jwt-secret-policy';
+
+const JWT_SECRET_REQUIRED = 'is required and has no default — set it explicitly';
 
 const envSchema = z.object({
   // Server
@@ -15,11 +18,15 @@ const envSchema = z.object({
   REDIS_OTP_TTL: z.coerce.number().default(300),
   REDIS_RATE_LIMIT_TTL: z.coerce.number().default(3600),
 
-  // JWT
-  JWT_ACCESS_SECRET: z.string().min(32),
+  // JWT — no default secret in ANY environment (TASK-006). Strength,
+  // distinctness and lifetimes are enforced by jwt-secret-policy.ts below.
+  JWT_ACCESS_SECRET: z.string({ required_error: JWT_SECRET_REQUIRED }).min(1, JWT_SECRET_REQUIRED),
   JWT_ACCESS_EXPIRY: z.string().default('15m'),
-  JWT_REFRESH_SECRET: z.string().min(32),
+  JWT_REFRESH_SECRET: z.string({ required_error: JWT_SECRET_REQUIRED }).min(1, JWT_SECRET_REQUIRED),
   JWT_REFRESH_EXPIRY: z.string().default('7d'),
+  // Comma-separated JWT subjects allowed to act with role=admin. There is
+  // no admin login yet, so the default (empty) refuses every admin token.
+  ADMIN_SUBJECT_IDS: z.string().default(''),
 
   // Twilio
   TWILIO_ACCOUNT_SID: z.string().optional(),
@@ -104,9 +111,8 @@ export type Env = z.infer<typeof envSchema>;
 
 const parsed = envSchema.safeParse({
   ...process.env,
-  // Inject sane defaults so the app boots in test even without a .env file.
-  JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET ?? 'dev-access-secret-change-me-must-be-32-chars-long',
-  JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET ?? 'dev-refresh-secret-change-me-must-be-32-chars-long',
+  // Local connection defaults only. JWT secrets deliberately have none —
+  // see jwt-secret-policy.ts.
   DATABASE_URL: process.env.DATABASE_URL ?? 'postgresql://flexpay:securepass@localhost:5432/flexpay?schema=public',
   REDIS_URL: process.env.REDIS_URL ?? 'redis://localhost:6379',
 });
@@ -116,7 +122,38 @@ if (!parsed.success) {
   throw new Error('Environment validation failed');
 }
 
+// Fail closed on weak, placeholder, publicly-known or shared JWT secrets
+// and on out-of-bounds token lifetimes. Reports variable names and rules
+// only — never the secret values.
+const jwtIssues = jwtConfigIssues(parsed.data);
+if (jwtIssues.length > 0) {
+  console.error(
+    'Invalid JWT configuration',
+    jwtIssues.map((issue) => `${issue.variable} ${issue.message}`),
+  );
+  throw new Error('Environment validation failed');
+}
+
 export const env: Env = parsed.data;
+
+function validatedTtlSeconds(raw: string): number {
+  const seconds = parseTtlSeconds(raw);
+  if (seconds === null) throw new Error('Environment validation failed');
+  return seconds;
+}
+
+/** Token lifetimes in seconds, already bounds-checked above. */
+export const jwtTtlSeconds = {
+  access: validatedTtlSeconds(env.JWT_ACCESS_EXPIRY),
+  refresh: validatedTtlSeconds(env.JWT_REFRESH_EXPIRY),
+} as const;
+
+/** JWT subjects permitted to use role=admin (empty → admin refused). */
+export const adminSubjectIds: ReadonlySet<string> = new Set(
+  env.ADMIN_SUBJECT_IDS.split(',')
+    .map((id) => id.trim())
+    .filter(Boolean),
+);
 
 export const isProd = env.NODE_ENV === 'production';
 export const isDev = env.NODE_ENV === 'development';

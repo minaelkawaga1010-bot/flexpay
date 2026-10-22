@@ -1,10 +1,10 @@
 import {
   randomBytes,
-  createHmac,
   timingSafeEqual,
   pbkdf2,
 } from 'crypto';
 import { db } from './db';
+import { signToken, verifySignedToken } from './jwt';
 
 // ==================== TYPES ====================
 
@@ -31,7 +31,6 @@ interface OTPEntry {
 
 // ==================== CONSTANTS ====================
 
-const JWT_SECRET = process.env.JWT_SECRET || 'flexpay-dev-secret-key-do-not-use-in-prod';
 const JWT_ACCESS_EXPIRY = 15 * 60 * 1000; // 15 minutes
 const JWT_REFRESH_EXPIRY = 7 * 24 * 60 * 60 * 1000; // 7 days
 const OTP_TTL = 5 * 60 * 1000; // 5 minutes
@@ -47,99 +46,27 @@ const otpStore = new Map<string, OTPEntry>();
 const refreshStore = new Map<string, StoredRefreshToken>();
 const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
 
-// ==================== BASE64URL ENCODING ====================
-
-function base64urlEncode(data: string): string {
-  return Buffer.from(data, 'utf-8')
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
-}
-
-function base64urlDecode(str: string): string {
-  const padded = str.replace(/-/g, '+').replace(/_/g, '/');
-  return Buffer.from(padded, 'base64').toString('utf-8');
-}
-
-// ==================== HMAC SIGNATURE ====================
-
-async function createHmacSignature(payload: string, secret: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const hmac = createHmac('sha256', secret);
-    hmac.on('error', reject);
-    hmac.on('data', (data: Buffer) => {
-      resolve(data.toString('base64url'));
-    });
-    hmac.end(payload);
-  });
-}
-
 // ==================== JWT TOKEN FUNCTIONS ====================
+// Signing and verification live in ./jwt (TASK-006): separate access and
+// refresh secrets, no fallback secret, strict header, fail closed.
 
 export async function generateAccessToken(payload: {
   userId: string;
   phone: string;
   role: string;
 }): Promise<string> {
-  const now = Date.now();
-  const tokenPayload = {
-    userId: payload.userId,
-    phone: payload.phone,
-    role: payload.role,
-    type: 'access' as const,
-    iat: now,
-    exp: now + JWT_ACCESS_EXPIRY,
-  };
-
-  const header = base64urlEncode(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const body = base64urlEncode(JSON.stringify(tokenPayload));
-  const signature = await createHmacSignature(`${header}.${body}`, JWT_SECRET);
-
-  return `${header}.${body}.${signature}`;
+  return signToken(
+    { userId: payload.userId, phone: payload.phone, role: payload.role, type: 'access' },
+    JWT_ACCESS_EXPIRY,
+  );
 }
 
 export async function generateRefreshToken(payload: { userId: string }): Promise<string> {
-  const now = Date.now();
-  const tokenPayload = {
-    userId: payload.userId,
-    type: 'refresh' as const,
-    iat: now,
-    exp: now + JWT_REFRESH_EXPIRY,
-  };
-
-  const header = base64urlEncode(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const body = base64urlEncode(JSON.stringify(tokenPayload));
-  const signature = await createHmacSignature(`${header}.${body}`, JWT_SECRET);
-
-  return `${header}.${body}.${signature}`;
+  return signToken({ userId: payload.userId, type: 'refresh' }, JWT_REFRESH_EXPIRY);
 }
 
 export function verifyToken(token: string): TokenPayload | null {
-  try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-
-    const [header, body, signature] = parts;
-
-    const expectedSig = createHmac('sha256', JWT_SECRET)
-      .update(`${header}.${body}`)
-      .digest('base64url');
-
-    if (!timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSig))) {
-      return null;
-    }
-
-    const payload = JSON.parse(base64urlDecode(body)) as TokenPayload;
-
-    if (Date.now() > payload.exp) {
-      return null;
-    }
-
-    return payload;
-  } catch {
-    return null;
-  }
+  return verifySignedToken(token) as TokenPayload | null;
 }
 
 // ==================== OTP ====================

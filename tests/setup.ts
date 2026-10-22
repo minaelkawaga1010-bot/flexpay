@@ -1,6 +1,11 @@
+import { randomBytes } from 'crypto';
+
 process.env.NODE_ENV = 'test';
-process.env.JWT_ACCESS_SECRET = 'test-access-secret-must-be-at-least-32-chars-xx';
-process.env.JWT_REFRESH_SECRET = 'test-refresh-secret-must-be-at-least-32-chars-x';
+// TASK-006: per-process random JWT secrets. No fixed test key exists that
+// could be copied into a real environment, and the startup secret policy
+// (src/config/jwt-secret-policy.ts) applies unchanged under test.
+process.env.JWT_ACCESS_SECRET = randomBytes(48).toString('hex');
+process.env.JWT_REFRESH_SECRET = randomBytes(48).toString('hex');
 process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
 process.env.REDIS_URL = 'redis://localhost:6379';
 // A.7 PII crypto — deterministic 32-byte (base64) data key for the

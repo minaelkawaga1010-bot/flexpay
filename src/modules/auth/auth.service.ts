@@ -296,12 +296,21 @@ export class AuthService {
       throw Unauthorized('INVALID_REFRESH_TOKEN');
     }
 
-    const user =
-      payload.role === 'employee'
-        ? await prisma.employee.findUnique({ where: { id: payload.userId } })
-        : await prisma.company.findUnique({ where: { id: payload.userId } });
+    // There is no admin login, so there is no legitimate admin token to
+    // refresh — an admin-role refresh token is refused outright.
+    if (payload.role === 'admin') throw Unauthorized('INVALID_REFRESH_TOKEN');
 
-    if (!user) throw Unauthorized('USER_NOT_FOUND');
+    // Same gates as login: a blocked employee or a suspended company
+    // cannot mint fresh tokens from an older refresh token.
+    if (payload.role === 'employee') {
+      const employee = await prisma.employee.findUnique({ where: { id: payload.userId } });
+      if (!employee) throw Unauthorized('USER_NOT_FOUND');
+      if (employee.status === EmployeeStatus.BLOCKED) throw Forbidden('ACCOUNT_BLOCKED');
+    } else {
+      const company = await prisma.company.findUnique({ where: { id: payload.userId } });
+      if (!company) throw Unauthorized('USER_NOT_FOUND');
+      if (company.status !== CompanyStatus.ACTIVE) throw Forbidden('ACCOUNT_SUSPENDED');
+    }
 
     return generateTokens({
       userId: payload.userId,
