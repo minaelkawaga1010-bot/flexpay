@@ -1,13 +1,15 @@
-import crypto from 'crypto';
 import { Request, Response, Router } from 'express';
 import { z } from 'zod';
 import { BillPaymentStatus } from '@prisma/client';
-import { env } from '@config/env';
 import { prisma } from '@config/prisma';
 import logger from '@shared/utils/logger';
 import { asyncHandler } from '@shared/utils/asyncHandler';
-import { Unauthorized } from '@shared/utils/errors';
 import { refundFailedBill, settleBillPayment } from '@modules/bill-payment/bill-payment.service';
+import {
+  assertWebhookAuthenticated,
+  processDeliveryOnce,
+  verifyRawBodyHmacRequest,
+} from './webhook-security';
 
 /**
  * Biller webhook — inbound rail confirmation for bill payments.
@@ -20,11 +22,11 @@ import { refundFailedBill, settleBillPayment } from '@modules/bill-payment/bill-
  *                                              wallet credit-back)
  *   Any terminal state    on replay           → no-op (idempotent)
  *
- * Security:
+ * Security (TASK-007):
  *   • Strict HMAC-SHA256 over the raw body using
- *     env.BILLER_WEBHOOK_SECRET. In non-prod with secret unset, we
- *     passthrough so CI and local tooling can hit the route. In
- *     production with secret unset the gate refuses (deploy error).
+ *     env.BILLER_WEBHOOK_SECRET, constant-time. Missing or weak secret
+ *     is a 503 in EVERY environment — there is no non-production
+ *     passthrough. Each signed delivery is single-use.
  *
  * Idempotency:
  *   • Lookup is keyed off external_ref (the rail-side reference set
@@ -88,27 +90,6 @@ function normaliseEvent(raw: z.infer<typeof webhookPayloadSchema>): BillerEvent 
 }
 
 // ───────────────────────────────────────────────────────────────────
-// Signature
-// ───────────────────────────────────────────────────────────────────
-
-function verifySignature(rawBody: Buffer, signature: string | undefined): boolean {
-  if (!env.BILLER_WEBHOOK_SECRET) return env.NODE_ENV !== 'production';
-  if (!signature) return false;
-
-  const expected = crypto
-    .createHmac('sha256', env.BILLER_WEBHOOK_SECRET)
-    .update(rawBody)
-    .digest('hex');
-
-  const provided = signature.startsWith('sha256=') ? signature.slice(7) : signature;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(provided, 'hex'), Buffer.from(expected, 'hex'));
-  } catch {
-    return false;
-  }
-}
-
-// ───────────────────────────────────────────────────────────────────
 // Handler
 // ───────────────────────────────────────────────────────────────────
 
@@ -120,22 +101,31 @@ export class BillerWebhook {
   }
 
   private handleStatus = async (req: Request, res: Response): Promise<void> => {
-    const ok = verifySignature(req.body as Buffer, req.header('x-biller-signature') ?? undefined);
-    if (!ok) throw Unauthorized('INVALID_SIGNATURE');
+    const auth = verifyRawBodyHmacRequest(req, 'biller');
+    assertWebhookAuthenticated(auth, 'biller');
+    await processDeliveryOnce(
+      res,
+      'biller',
+      { key: auth.deliveryKey, ttlSeconds: auth.deliveryTtlSeconds },
+      () => this.processStatus(req, res),
+    );
+  };
 
+  private async processStatus(req: Request, res: Response): Promise<void> {
     let raw: unknown;
     try {
       raw = JSON.parse((req.body as Buffer).toString('utf8'));
-    } catch (err) {
-      logger.warn('biller webhook: invalid JSON', { error: (err as Error).message });
+    } catch {
+      logger.warn('biller webhook: invalid JSON');
       res.status(400).json({ error: 'INVALID_JSON' });
       return;
     }
 
     const parseResult = webhookPayloadSchema.safeParse(raw);
     if (!parseResult.success) {
+      // Field paths only — never payload values.
       logger.warn('biller webhook: payload validation failed', {
-        issues: parseResult.error.flatten(),
+        fields: parseResult.error.issues.map((issue) => issue.path.join('.')),
       });
       res.status(400).json({ error: 'INVALID_PAYLOAD', details: parseResult.error.flatten() });
       return;
@@ -180,7 +170,7 @@ export class BillerWebhook {
     }
 
     res.status(200).json({ received: true });
-  };
+  }
 }
 
 export const billerWebhook = new BillerWebhook();

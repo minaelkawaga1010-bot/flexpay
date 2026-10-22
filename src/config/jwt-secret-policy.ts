@@ -61,17 +61,29 @@ function sha256Hex(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-/** Returns the first policy violation for a secret, or null when acceptable. */
-export function checkJwtSecret(
+/**
+ * Generic shared-secret strength check (also used for webhook
+ * credentials, TASK-007). Returns the first violation, or null.
+ */
+export function checkSecretStrength(
   value: string | undefined,
+  minLength: number,
   compromised: ReadonlySet<string> = KNOWN_COMPROMISED_JWT_SECRET_SHA256,
 ): JwtSecretProblem | null {
   if (value === undefined || value.trim() === '') return 'missing';
-  if (value.length < MIN_JWT_SECRET_LENGTH) return 'too_short';
+  if (value.length < minLength) return 'too_short';
   if (compromised.has(sha256Hex(value))) return 'known_compromised';
   if (PLACEHOLDER_PATTERN.test(value)) return 'placeholder';
   if (new Set(value).size < MIN_DISTINCT_CHARS) return 'low_variety';
   return null;
+}
+
+/** Returns the first policy violation for a JWT secret, or null when acceptable. */
+export function checkJwtSecret(
+  value: string | undefined,
+  compromised: ReadonlySet<string> = KNOWN_COMPROMISED_JWT_SECRET_SHA256,
+): JwtSecretProblem | null {
+  return checkSecretStrength(value, MIN_JWT_SECRET_LENGTH, compromised);
 }
 
 const PROBLEM_MESSAGES: Record<JwtSecretProblem, string> = {

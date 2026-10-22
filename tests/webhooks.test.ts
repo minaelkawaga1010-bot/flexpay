@@ -12,7 +12,8 @@
  * pattern in tests/cashback.test.ts.
  *
  * What we verify:
- *   • Strict HMAC signature gate — rejects unsigned and tampered.
+ *   • Fail-closed authentication gate (TASK-007) — NymCard nCore Basic
+ *     Auth, MoneyHash v3 signatures; rejects unsigned and tampered.
  *   • Idempotency — replayed events do not double-effect ledger / wallet.
  *   • Atomic happy path — all writes flow through a single $transaction.
  *   • Failed remittance triggers an append-only REFUND row + credits
@@ -27,19 +28,47 @@
 // ───────────────────────────────────────────────────────────────────
 
 // env is captured at import time by the handler. Mock it so the
-// MoneyHash secret and NODE_ENV are set at the moment the webhook
-// module reads them, not just at test runtime.
-jest.mock('@config/env', () => ({
-  env: {
-    NODE_ENV: 'production',
-    MONEYHASH_WEBHOOK_SECRET: 'test-secret',
-    NYMCARD_WEBHOOK_SECRET: 'test-secret',
-    WEBHOOK_SIGNATURE_HEADER: 'x-nymcard-signature',
-    REMITTANCE_FX_SPREAD: 0.005,
-  },
-  isProd: true,
-  isTest: false,
-}));
+// webhook credentials and NODE_ENV are set at the moment the webhook
+// module reads them, not just at test runtime. Credentials are random
+// per run (TASK-007) — the verifiers refuse weak or fixed values.
+jest.mock('@config/env', () => {
+  const { randomBytes } = require('crypto');
+  return {
+    env: {
+      NODE_ENV: 'production',
+      MONEYHASH_WEBHOOK_SECRET: randomBytes(32).toString('hex'),
+      MONEYHASH_WEBHOOK_TOLERANCE_SECONDS: 300,
+      NYMCARD_WEBHOOK_BASIC_USER: 'flexpay-unit-test',
+      NYMCARD_WEBHOOK_BASIC_PASSWORD: randomBytes(32).toString('hex'),
+      WEBHOOK_REPLAY_TTL_SECONDS: 604800,
+      REMITTANCE_FX_SPREAD: 0.005,
+    },
+    isProd: true,
+    isTest: false,
+  };
+});
+
+// Delivery replay markers live in Redis; a fresh store per test keeps
+// tests that reuse a payload independent of each other.
+jest.mock('@config/redis', () => {
+  const store = new Map<string, string>();
+  const redisService = {
+    setIfAbsent: jest.fn(async (key: string, value: string) => {
+      if (store.has(key)) return false;
+      store.set(key, value);
+      return true;
+    }),
+    get: jest.fn(async (key: string) => store.get(key) ?? null),
+    set: jest.fn(async (key: string, value: string) => {
+      store.set(key, value);
+    }),
+    del: jest.fn(async (key: string) => {
+      store.delete(key);
+    }),
+    __store: store,
+  };
+  return { __esModule: true, default: redisService, redisService };
+});
 
 jest.mock('@config/prisma', () => {
   const tx = {
@@ -64,16 +93,10 @@ jest.mock('@modules/cashback/cashback.service', () => ({
   cashbackService: { processCashback: jest.fn().mockResolvedValue(undefined) },
 }));
 
-// We mock the nymcardService signature verifier so the test controls
-// the verdict directly — the verifier's own HMAC math is exercised by
-// nymcard service-level tests (out of scope here).
-jest.mock('@modules/cards/nymcard.service', () => ({
-  nymcardService: { verifyWebhookSignature: jest.fn() },
-}));
-
 import crypto from 'crypto';
+import { env } from '@config/env';
 import { prisma } from '@config/prisma';
-import { nymcardService } from '@modules/cards/nymcard.service';
+import redisService from '@config/redis';
 import { cashbackService } from '@modules/cashback/cashback.service';
 import { nymCardCardWebhook } from '../src/webhooks/nymcard-card.webhook';
 import { moneyHashRemittanceWebhook } from '../src/webhooks/moneyhash-remittance.webhook';
@@ -96,7 +119,15 @@ const mocked = prisma as unknown as {
 // Request stub builders
 // ───────────────────────────────────────────────────────────────────
 
-function buildReq(body: unknown, headers: Record<string, string> = {}): any {
+/** nCore Basic Auth header for the configured webhook credentials. */
+function nymcardAuth(
+  user = env.NYMCARD_WEBHOOK_BASIC_USER as string,
+  password = env.NYMCARD_WEBHOOK_BASIC_PASSWORD as string,
+): Record<string, string> {
+  return { authorization: `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}` };
+}
+
+function buildReq(body: unknown, headers: Record<string, string> = nymcardAuth()): any {
   const buf = Buffer.from(JSON.stringify(body));
   return {
     body: buf,
@@ -142,6 +173,7 @@ async function invokeRoute(router: any, path: string, req: any, res: any): Promi
 
 beforeEach(() => {
   jest.clearAllMocks();
+  (redisService as unknown as { __store: Map<string, string> }).__store.clear();
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -182,9 +214,17 @@ describe('NymCardCardWebhook /transaction', () => {
     };
   }
 
-  it('rejects when HMAC signature is invalid', async () => {
-    (nymcardService.verifyWebhookSignature as jest.Mock).mockReturnValue(false);
-    const req = buildReq(happyPathPayload());
+  it('rejects wrong Basic Auth credentials before any DB read', async () => {
+    const req = buildReq(happyPathPayload(), nymcardAuth(undefined, 'wrong-password'));
+    const res = buildRes();
+    await expect(
+      invokeRoute(nymCardCardWebhook.router, '/transaction', req, res),
+    ).rejects.toMatchObject({ status: 401 });
+    expect(mocked.card.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('rejects a request with no credentials', async () => {
+    const req = buildReq(happyPathPayload(), {});
     const res = buildRes();
     await expect(
       invokeRoute(nymCardCardWebhook.router, '/transaction', req, res),
@@ -192,7 +232,6 @@ describe('NymCardCardWebhook /transaction', () => {
   });
 
   it('processes a settled purchase atomically: txn + wallet decrement + interchange audit', async () => {
-    (nymcardService.verifyWebhookSignature as jest.Mock).mockReturnValue(true);
     mocked.card.findUnique.mockResolvedValue(cardRow);
     mocked.employee.findUnique.mockResolvedValue(employeeRow);
     mocked.employeeTransaction.findUnique.mockResolvedValue(null); // not a replay
@@ -234,7 +273,6 @@ describe('NymCardCardWebhook /transaction', () => {
   });
 
   it('idempotency: a replayed event short-circuits before opening a $transaction', async () => {
-    (nymcardService.verifyWebhookSignature as jest.Mock).mockReturnValue(true);
     mocked.card.findUnique.mockResolvedValue(cardRow);
     mocked.employee.findUnique.mockResolvedValue(employeeRow);
     mocked.employeeTransaction.findUnique.mockResolvedValue({ id: 'txn-prev' }); // replay!
@@ -249,7 +287,6 @@ describe('NymCardCardWebhook /transaction', () => {
   });
 
   it('refund event credits the wallet back and does NOT book interchange', async () => {
-    (nymcardService.verifyWebhookSignature as jest.Mock).mockReturnValue(true);
     mocked.card.findUnique.mockResolvedValue(cardRow);
     mocked.employee.findUnique.mockResolvedValue(employeeRow);
     mocked.employeeTransaction.findUnique.mockResolvedValue(null);
@@ -288,7 +325,6 @@ describe('NymCardCardWebhook /transaction', () => {
   });
 
   it('authorized events ACK without touching the ledger', async () => {
-    (nymcardService.verifyWebhookSignature as jest.Mock).mockReturnValue(true);
     const req = buildReq({
       type: 'transaction.authorized',
       data: { id: 'nym-evt-auth', cardId: 'nym-ext-1', amount: 50, currency: 'AED' },
@@ -302,7 +338,6 @@ describe('NymCardCardWebhook /transaction', () => {
   });
 
   it('unknown card returns ACK without writes', async () => {
-    (nymcardService.verifyWebhookSignature as jest.Mock).mockReturnValue(true);
     mocked.card.findUnique.mockResolvedValue(null);
 
     const req = buildReq(happyPathPayload());
@@ -316,7 +351,6 @@ describe('NymCardCardWebhook /transaction', () => {
 
 describe('NymCardCardWebhook /card-status', () => {
   it('coerces a recognised status, writes audit log, returns 200', async () => {
-    (nymcardService.verifyWebhookSignature as jest.Mock).mockReturnValue(true);
     mocked.card.findUnique.mockResolvedValue({ id: 'c1', cardId: 'nym-1', status: 'ACTIVE' });
     mocked.card.update.mockResolvedValue({});
     mocked.auditLog.create.mockResolvedValue({});
@@ -334,7 +368,6 @@ describe('NymCardCardWebhook /card-status', () => {
   });
 
   it('returns 202 for an unknown card (no retry storm)', async () => {
-    (nymcardService.verifyWebhookSignature as jest.Mock).mockReturnValue(true);
     mocked.card.findUnique.mockResolvedValue(null);
 
     const req = buildReq({ cardId: 'nym-unknown', status: 'BLOCKED' });
@@ -350,24 +383,18 @@ describe('NymCardCardWebhook /card-status', () => {
 // ═══════════════════════════════════════════════════════════════════
 
 describe('MoneyHashRemittanceWebhook /status', () => {
-  const SECRET = 'test-secret';
-
   /**
-   * Builds a request with a valid HMAC. Mirrors what MoneyHash
-   * would send: hex-encoded sha256 of the raw body, optionally
-   * prefixed with `sha256=`.
+   * Builds a request the way MoneyHash signs it (v3):
+   * `MoneyHash-Signature: t=<unix>,v3=<hex HMAC-SHA256(base64(raw body) + t)>`.
    */
-  function signedReq(body: unknown, secret = SECRET, withPrefix = false): any {
+  function signedReq(body: unknown, secret = env.MONEYHASH_WEBHOOK_SECRET as string): any {
     const buf = Buffer.from(JSON.stringify(body));
-    const sig = crypto.createHmac('sha256', secret).update(buf).digest('hex');
+    const t = Math.floor(Date.now() / 1000);
+    const v3 = crypto.createHmac('sha256', secret).update(buf.toString('base64') + t).digest('hex');
     return {
       body: buf,
       header: (name: string) =>
-        name.toLowerCase() === 'x-moneyhash-signature'
-          ? withPrefix
-            ? `sha256=${sig}`
-            : sig
-          : undefined,
+        name.toLowerCase() === 'moneyhash-signature' ? `t=${t},v3=${v3}` : undefined,
     };
   }
 
@@ -384,16 +411,12 @@ describe('MoneyHashRemittanceWebhook /status', () => {
   });
 
   it('rejects when signature does not match', async () => {
-    const body = { transferId: 'tr-1', status: 'succeeded' };
-    const wrongSig = crypto.createHmac('sha256', 'wrong-secret').update(JSON.stringify(body)).digest('hex');
-    const req: any = {
-      body: Buffer.from(JSON.stringify(body)),
-      header: (n: string) => (n.toLowerCase() === 'x-moneyhash-signature' ? wrongSig : undefined),
-    };
+    const req = signedReq({ transferId: 'tr-1', status: 'succeeded' }, 'wrong-secret');
     const res = buildRes();
     await expect(
       invokeRoute(moneyHashRemittanceWebhook.router, '/status', req, res),
     ).rejects.toMatchObject({ status: 401 });
+    expect(mocked.employeeTransaction.findFirst).not.toHaveBeenCalled();
   });
 
   it('succeeded: marks the original COMPLETED + writes audit log inside one tx', async () => {
@@ -588,24 +611,22 @@ describe('MoneyHashRemittanceWebhook /status', () => {
     );
   });
 
-  it('accepts sha256-prefixed signatures (MoneyHash transport variant)', async () => {
-    mocked.employeeTransaction.findFirst.mockResolvedValue({
-      id: 'txn-orig',
-      employeeId: 'emp-1',
-      status: 'PENDING',
-      totalAmount: 500,
-      fee: 5,
-      currency: 'AED',
-      reference: 'tr-prefixed',
-    });
-    mocked.__tx.employeeTransaction.update.mockResolvedValue({});
-    mocked.__tx.auditLog.create.mockResolvedValue({});
-
-    const req = signedReq({ transferId: 'tr-prefixed', status: 'succeeded' }, SECRET, true);
+  it("rejects the legacy x-moneyhash-signature header — not MoneyHash's protocol", async () => {
+    // Pre-TASK-007 the handler accepted a bare hex HMAC of the body in a
+    // header MoneyHash never sends. Even correctly keyed, it is refused.
+    const buf = Buffer.from(JSON.stringify({ transferId: 'tr-legacy', status: 'failed' }));
+    const legacy = crypto
+      .createHmac('sha256', env.MONEYHASH_WEBHOOK_SECRET as string)
+      .update(buf)
+      .digest('hex');
+    const req: any = {
+      body: buf,
+      header: (n: string) => (n.toLowerCase() === 'x-moneyhash-signature' ? `sha256=${legacy}` : undefined),
+    };
     const res = buildRes();
-    await invokeRoute(moneyHashRemittanceWebhook.router, '/status', req, res);
-
-    expect(res.statusCode).toBe(200);
-    expect(mocked.$transaction).toHaveBeenCalledTimes(1);
+    await expect(
+      invokeRoute(moneyHashRemittanceWebhook.router, '/status', req, res),
+    ).rejects.toMatchObject({ status: 401 });
+    expect(mocked.$transaction).not.toHaveBeenCalled();
   });
 });

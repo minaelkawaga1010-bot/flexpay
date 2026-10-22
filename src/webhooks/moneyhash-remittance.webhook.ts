@@ -1,12 +1,14 @@
 import { Request, Response, Router } from 'express';
-import crypto from 'crypto';
 import { Prisma, TransactionStatus, TransactionType } from '@prisma/client';
 import { z } from 'zod';
-import { env } from '@config/env';
 import { prisma } from '@config/prisma';
 import logger from '@shared/utils/logger';
 import { asyncHandler } from '@shared/utils/asyncHandler';
-import { Unauthorized } from '@shared/utils/errors';
+import {
+  assertWebhookAuthenticated,
+  processDeliveryOnce,
+  verifyMoneyHashRequest,
+} from './webhook-security';
 
 /**
  * MoneyHash webhook — production-grade cross-border remittance handler.
@@ -21,11 +23,12 @@ import { Unauthorized } from '@shared/utils/errors';
  *   Any state → status reported again ⇒ idempotent no-op (no double-
  *                                       refund, no double-credit)
  *
- * Security:
- *   • Strict HMAC-SHA256 over the raw body using
- *     env.MONEYHASH_WEBHOOK_SECRET. Production with secret unset is a
- *     deploy-time configuration error; we passthrough in non-prod so
- *     local tooling and CI can hit the route without forcing a key.
+ * Security (TASK-007):
+ *   • MoneyHash's documented v3 signature (`MoneyHash-Signature:
+ *     t=…,v3=…`, HMAC-SHA256 over base64(raw body) + t) with the signed
+ *     timestamp inside MONEYHASH_WEBHOOK_TOLERANCE_SECONDS. Each
+ *     signature is single-use. Missing or weak configuration is a 503 in
+ *     EVERY environment — there is no non-production passthrough.
  *
  * Atomicity:
  *   • On failure, the original `EmployeeTransaction` is marked FAILED,
@@ -107,32 +110,6 @@ function normaliseEvent(raw: z.infer<typeof statusPayloadSchema>): StatusEvent {
 }
 
 // ───────────────────────────────────────────────────────────────────
-// Signature
-// ───────────────────────────────────────────────────────────────────
-
-function verifySignature(rawBody: Buffer, signature: string | undefined): boolean {
-  // In production the secret MUST be set — deploys without it cannot
-  // legitimately receive webhooks. Outside production (test/dev) we
-  // passthrough so tooling and CI can hit the route.
-  if (!env.MONEYHASH_WEBHOOK_SECRET) return env.NODE_ENV !== 'production';
-  if (!signature) return false;
-
-  const expected = crypto
-    .createHmac('sha256', env.MONEYHASH_WEBHOOK_SECRET)
-    .update(rawBody)
-    .digest('hex');
-
-  // Strip an optional `sha256=` scheme prefix so we accept both
-  // schemes-tagged and bare-hex signatures.
-  const provided = signature.startsWith('sha256=') ? signature.slice(7) : signature;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(provided, 'hex'), Buffer.from(expected, 'hex'));
-  } catch {
-    return false;
-  }
-}
-
-// ───────────────────────────────────────────────────────────────────
 // Idempotency key namespacing for the rollback refund row
 // ───────────────────────────────────────────────────────────────────
 
@@ -152,22 +129,31 @@ export class MoneyHashRemittanceWebhook {
   }
 
   private handleStatus = async (req: Request, res: Response): Promise<void> => {
-    const ok = verifySignature(req.body as Buffer, req.header('x-moneyhash-signature') ?? undefined);
-    if (!ok) throw Unauthorized('INVALID_SIGNATURE');
+    const auth = verifyMoneyHashRequest(req);
+    assertWebhookAuthenticated(auth, 'moneyhash');
+    await processDeliveryOnce(
+      res,
+      'moneyhash',
+      { key: auth.deliveryKey, ttlSeconds: auth.deliveryTtlSeconds },
+      () => this.processStatus(req, res),
+    );
+  };
 
+  private async processStatus(req: Request, res: Response): Promise<void> {
     let raw: unknown;
     try {
       raw = JSON.parse((req.body as Buffer).toString('utf8'));
-    } catch (err) {
-      logger.warn('moneyhash webhook: invalid JSON', { error: (err as Error).message });
+    } catch {
+      logger.warn('moneyhash webhook: invalid JSON');
       res.status(400).json({ error: 'INVALID_JSON' });
       return;
     }
 
     const parseResult = statusPayloadSchema.safeParse(raw);
     if (!parseResult.success) {
+      // Field paths only — never payload values.
       logger.warn('moneyhash webhook: payload validation failed', {
-        issues: parseResult.error.flatten(),
+        fields: parseResult.error.issues.map((issue) => issue.path.join('.')),
       });
       res.status(400).json({ error: 'INVALID_PAYLOAD', details: parseResult.error.flatten() });
       return;
@@ -209,7 +195,7 @@ export class MoneyHashRemittanceWebhook {
     }
 
     res.status(200).json({ received: true });
-  };
+  }
 
   // ────────────────────────────────────────────────────────────────
   // Success path
@@ -389,8 +375,6 @@ export class MoneyHashRemittanceWebhook {
     logger.info('moneyhash remittance failed → wallet rolled back', {
       transferId: event.transferId,
       employeeId: original.employeeId,
-      refundAmount,
-      failureReason: event.failureReason ?? null,
     });
   }
 }

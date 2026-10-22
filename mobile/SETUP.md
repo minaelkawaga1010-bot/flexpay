@@ -12,14 +12,18 @@ The backend reads `.env.example` as its template. Copy it and fill in:
 | Variable | Where to get it | Used by |
 | --- | --- | --- |
 | `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_PHONE_NUMBER` | [Twilio console](https://console.twilio.com/) → Account → API keys; SMS-capable phone number | `twilioService.sendOTP`, `sendWelcomeSMS` |
-| `NYMCARD_API_KEY` / `NYMCARD_WEBHOOK_SECRET` | NymCard sandbox onboarding (request via `partnerships@nymcard.com`); generate the webhook secret in their dashboard and mirror it here | virtual + physical card issuance, transaction webhooks |
+| `NYMCARD_API_KEY` / `NYMCARD_WEBHOOK_BASIC_USER` / `NYMCARD_WEBHOOK_BASIC_PASSWORD` (+ optional `NYMCARD_WEBHOOK_HEADER_NAME` / `NYMCARD_WEBHOOK_HEADER_VALUE`) | NymCard sandbox onboarding (request via `partnerships@nymcard.com`); generate the Basic Auth password yourself (`openssl rand -hex 32`) and register the same credentials on the nCore webhook | virtual + physical card issuance, transaction webhooks |
 | `MONEYHASH_API_KEY` / `MONEYHASH_WEBHOOK_SECRET` | [MoneyHash](https://moneyhash.io/) sandbox keys | international remittance |
+| `FLEXXPAY_WEBHOOK_SECRET` / `BILLER_WEBHOOK_SECRET` | Shared HMAC keys agreed with each rail (min 16 chars) | EWA loan-status and bill-payment webhooks |
 | `FLEXXPAY_API_KEY` / `FLEXXPAY_REDIRECT_URL` | FlexxPay partnership onboarding | EWA salary advance redirect |
 | `FIREBASE_PROJECT_ID` / `FIREBASE_PRIVATE_KEY` / `FIREBASE_CLIENT_EMAIL` | Firebase Console → Project Settings → Service Accounts → "Generate new private key" | server-side push (`getFirebaseMessaging()`) |
 
 Without these the backend falls through to log-only stubs — the auth
 flow still works end-to-end against the in-memory OTP store, but no
-real SMS / card / push is delivered.
+real SMS / card / push is delivered. Webhooks are the exception: an
+endpoint whose credentials are missing or weak refuses every request
+(503) in every environment, and `NODE_ENV=production` refuses to start
+while any money-moving integration is a stub or points at a sandbox.
 
 ## 2. Twilio sandbox testing
 
@@ -61,9 +65,12 @@ Redis directly — never ship that override to production.
      -H "Authorization: Bearer $ACCESS_TOKEN" | jq
    ```
 4. Configure NymCard's webhook URL to
-   `https://<your-backend>/webhooks/nymcard` and copy the signing
-   secret into `NYMCARD_WEBHOOK_SECRET`. The handler verifies an
-   `x-nymcard-signature` header (HMAC-SHA256) before any DB write.
+   `https://<your-backend>/webhooks/nymcard` with Basic Auth using
+   `NYMCARD_WEBHOOK_BASIC_USER` / `NYMCARD_WEBHOOK_BASIC_PASSWORD` (and,
+   if set, the custom header `NYMCARD_WEBHOOK_HEADER_NAME` carrying
+   `NYMCARD_WEBHOOK_HEADER_VALUE`). The handler checks them in constant
+   time before any DB write; nCore sends no body signature, so these
+   credentials and TLS are the only protection — keep them secret.
 
 ## 4. Firebase project setup
 

@@ -1,5 +1,6 @@
 import { app } from './app';
-import { env } from '@config/env';
+import { env, isProd } from '@config/env';
+import { productionAdapterIssues } from '@config/integration-safety';
 import { prisma, disconnectPrisma } from '@config/prisma';
 import { closeAllQueues } from '@config/bull';
 import redisService from '@config/redis';
@@ -11,9 +12,20 @@ import { registerCronJobs } from '@modules/savings/savings.job';
 import { setPromptFirewall } from '@shared/security/prompt-firewall';
 import { buildPromptFirewallDeps } from '@shared/security/prompt-firewall-impl';
 import { initialiseKeyProvider } from '@shared/security/pii-crypto';
+import { isStubBillerAdapter } from '@modules/bill-payment/biller-adapter.service';
 
 async function startServer(): Promise<void> {
   try {
+    // TASK-007: runtime-bound money-moving adapters must be real in
+    // production (env-level integrations are already checked in env.ts).
+    // Bind real adapters above this check; it runs before any connection.
+    if (isProd) {
+      const adapterIssues = productionAdapterIssues({ billerAdapterIsStub: isStubBillerAdapter() });
+      if (adapterIssues.length > 0) {
+        throw new Error(`Refusing to start in production: ${adapterIssues.join('; ')}`);
+      }
+    }
+
     await prisma.$connect();
     await redisService.connect();
 

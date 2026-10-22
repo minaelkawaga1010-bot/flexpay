@@ -6,14 +6,38 @@
  * settlement, append-only refund on failure, and replay no-ops.
  */
 
+// Random per run (TASK-007): the verifier refuses weak or fixed secrets.
 jest.mock('@config/env', () => ({
   env: {
     NODE_ENV: 'production',
-    BILLER_WEBHOOK_SECRET: 'test-biller-secret',
+    BILLER_WEBHOOK_SECRET: require('crypto').randomBytes(32).toString('hex'),
+    WEBHOOK_REPLAY_TTL_SECONDS: 604800,
   },
   isProd: true,
   isTest: false,
 }));
+
+// Delivery replay markers live in Redis; a fresh store per test keeps
+// tests that reuse a payload independent of each other.
+jest.mock('@config/redis', () => {
+  const store = new Map<string, string>();
+  const redisService = {
+    setIfAbsent: jest.fn(async (key: string, value: string) => {
+      if (store.has(key)) return false;
+      store.set(key, value);
+      return true;
+    }),
+    get: jest.fn(async (key: string) => store.get(key) ?? null),
+    set: jest.fn(async (key: string, value: string) => {
+      store.set(key, value);
+    }),
+    del: jest.fn(async (key: string) => {
+      store.delete(key);
+    }),
+    __store: store,
+  };
+  return { __esModule: true, default: redisService, redisService };
+});
 
 jest.mock('@config/prisma', () => {
   return {
@@ -30,7 +54,9 @@ jest.mock('@modules/bill-payment/bill-payment.service', () => ({
 
 import crypto from 'crypto';
 import { BillPaymentStatus } from '@prisma/client';
+import { env } from '@config/env';
 import { prisma } from '@config/prisma';
+import redisService from '@config/redis';
 import {
   refundFailedBill,
   settleBillPayment,
@@ -41,7 +67,7 @@ const mocked = prisma as unknown as {
   billPayment: { findFirst: jest.Mock };
 };
 
-const SECRET = 'test-biller-secret';
+const SECRET = env.BILLER_WEBHOOK_SECRET as string;
 
 function signedReq(body: unknown, secret = SECRET, withPrefix = false): any {
   const buf = Buffer.from(JSON.stringify(body));
@@ -86,6 +112,7 @@ async function invokeRoute(router: any, path: string, req: any, res: any): Promi
 
 beforeEach(() => {
   jest.clearAllMocks();
+  (redisService as unknown as { __store: Map<string, string> }).__store.clear();
 });
 
 describe('BillerWebhook /status — signature gate', () => {

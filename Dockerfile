@@ -14,6 +14,12 @@ RUN npm run build
 # ===== PRODUCTION STAGE =====
 FROM node:18-alpine AS production
 
+# TASK-007: the image always runs as production so the startup gates
+# (KMS-only PII keys, no stub or sandbox money-moving integrations,
+# strong webhook credentials) apply. Configuration is injected at
+# runtime by the orchestrator — never baked in from an example file.
+ENV NODE_ENV=production
+
 WORKDIR /app
 
 RUN addgroup -g 1001 -S nodejs && \
@@ -25,8 +31,6 @@ RUN npm ci --only=production --ignore-scripts
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
-
-COPY .env.example .env
 
 RUN chown -R flexpay:nodejs /app
 USER flexpay

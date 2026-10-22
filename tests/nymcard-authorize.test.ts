@@ -5,7 +5,7 @@
  *   • HeuristicFraudScorer risk surface (safe / velocity / MCC / geo)
  *   • /authorize decision pipeline: APPROVE, DECLINE(FRAUD_RISK),
  *     DECLINE(INSUFFICIENT_FUNDS), DECLINE(BALANCE_UNAVAILABLE),
- *     invalid signature → 401, malformed body → DECLINE
+ *     invalid nCore Basic Auth → 401 (TASK-007), malformed body → DECLINE
  *   • Latency: a happy-path decision stays well under the 50ms budget
  */
 
@@ -24,12 +24,7 @@ jest.mock('@config/redis', () => ({
   },
 }));
 
-jest.mock('@modules/cards/nymcard.service', () => ({
-  nymcardService: { verifyWebhookSignature: jest.fn() },
-}));
-
 import { prisma } from '@config/prisma';
-import { nymcardService } from '@modules/cards/nymcard.service';
 import { nymCardAuthorizeWebhook } from '../src/webhooks/nymcard-authorize.webhook';
 import {
   HeuristicFraudScorer,
@@ -38,7 +33,13 @@ import {
 
 const mocked = prisma as unknown as { card: { findUnique: jest.Mock } };
 
-function buildReq(body: unknown, headers: Record<string, string> = {}): any {
+/** nCore Basic Auth with the random credentials from tests/setup.ts. */
+function basicAuth(password = process.env.NYMCARD_WEBHOOK_BASIC_PASSWORD as string): Record<string, string> {
+  const user = process.env.NYMCARD_WEBHOOK_BASIC_USER as string;
+  return { authorization: `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}` };
+}
+
+function buildReq(body: unknown, headers: Record<string, string> = basicAuth()): any {
   return {
     body: Buffer.from(JSON.stringify(body)),
     header: (name: string) => headers[name.toLowerCase()],
@@ -87,7 +88,6 @@ const validBody = {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  (nymcardService.verifyWebhookSignature as jest.Mock).mockReturnValue(true);
 });
 
 // ───────────────────────────────────────────────────────────────────
@@ -184,18 +184,26 @@ describe('NymCardAuthorizeWebhook /authorize', () => {
     expect(res.body).toEqual({ decision: 'DECLINE', reason: 'BALANCE_UNAVAILABLE' });
   });
 
-  it('returns 401 on an invalid HMAC signature', async () => {
-    (nymcardService.verifyWebhookSignature as jest.Mock).mockReturnValue(false);
-    const req = buildReq(validBody);
+  it('returns 401 on invalid Basic Auth credentials — never scored', async () => {
+    const req = buildReq(validBody, basicAuth('not-the-password'));
     const res = buildRes();
     await invoke(req, res);
     expect(res.statusCode).toBe(401);
-    expect(res.body).toEqual({ error: 'invalid_signature' });
+    expect(res.body).toEqual({ error: 'invalid_credentials' });
+    expect(mocked.card.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when no credentials are presented', async () => {
+    const req = buildReq(validBody, {});
+    const res = buildRes();
+    await invoke(req, res);
+    expect(res.statusCode).toBe(401);
+    expect(res.body).toEqual({ error: 'invalid_credentials' });
   });
 
   it('DECLINEs a malformed body (fail safe)', async () => {
-    const req = { body: Buffer.from('not json'), header: () => undefined } as any;
-    (nymcardService.verifyWebhookSignature as jest.Mock).mockReturnValue(true);
+    const headers = basicAuth();
+    const req = { body: Buffer.from('not json'), header: (n: string) => headers[n.toLowerCase()] } as any;
     const res = buildRes();
     await invoke(req, res);
     expect(res.body).toEqual({ decision: 'DECLINE', reason: 'MALFORMED_REQUEST' });

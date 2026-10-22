@@ -1,5 +1,4 @@
 import { randomUUID } from 'crypto';
-import crypto from 'crypto';
 import axios, { AxiosError, AxiosInstance } from 'axios';
 import { env } from '@config/env';
 import logger from '@shared/utils/logger';
@@ -189,24 +188,6 @@ export class NymCardService {
       const { data } = await this.client.get(`/cards/${cardId}/sensitive`);
       return { pan: data.pan, cvv: data.cvv };
     });
-  }
-
-  // ----------------------------------------------------- Webhook signature
-
-  verifyWebhookSignature(rawBody: Buffer, signatureHeader: string | undefined): boolean {
-    if (!env.NYMCARD_WEBHOOK_SECRET) return true;
-    if (!signatureHeader) return false;
-    const [scheme, sig] = signatureHeader.split('=');
-    if (scheme !== 'sha256' || !sig) return false;
-    const expected = crypto
-      .createHmac('sha256', env.NYMCARD_WEBHOOK_SECRET)
-      .update(rawBody)
-      .digest('hex');
-    try {
-      return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
-    } catch {
-      return false;
-    }
   }
 
   // --------------------------------------------------------------- Helpers
