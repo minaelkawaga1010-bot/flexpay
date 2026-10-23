@@ -88,9 +88,9 @@ class MobileRemittanceService {
    *
    * The quote is single-use: a successful send deletes the lock so a
    * duplicated request (network retry, double-tap) is rejected on the
-   * second attempt — wallet idempotency comes from the existing
-   * EmployeeTransaction.idempotencyKey unique index in
-   * remittanceService.send.
+   * second attempt. The read-then-delete below is not atomic, so the
+   * guarantee comes from the quote id travelling as the remittance's
+   * idempotency key — unique in EmployeeTransaction (TASK-011).
    */
   async send(employeeId: string, quoteId: string, beneficiary: Beneficiary) {
     const raw = await redisService.get(key(quoteId));
@@ -103,13 +103,14 @@ class MobileRemittanceService {
       throw NotFound('Quote not found for this user');
     }
 
-    // Drop the lock *before* the rail call to make double-execution
-    // structurally impossible from this gateway. (The underlying
-    // remittanceService.send still does its own Prisma-level
-    // idempotency check on the resulting transaction reference.)
+    // Drop the lock *before* the rail call so a later retry is refused
+    // here. Two requests that both read the quote before this delete are
+    // stopped by the unique idempotency key in remittanceService.send.
     await redisService.del(key(quoteId));
 
-    return remittanceService.send(employeeId, locked.amount, locked.currency, beneficiary);
+    return remittanceService.send(employeeId, locked.amount, locked.currency, beneficiary, {
+      idempotencyKey: `quote:${quoteId}`,
+    });
   }
 
   /**

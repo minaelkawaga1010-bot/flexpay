@@ -19,6 +19,9 @@
  *   • Failed remittance triggers an append-only REFUND row + credits
  *     the wallet back. The original row is marked FAILED but its
  *     amounts are NOT mutated (the append-only invariant).
+ *   • Remittance decisions are taken on the row re-read under the
+ *     WALLET_DEBIT lock; a failure or reversal after COMPLETED never
+ *     refunds — it is audited as a conflict (TASK-011).
  *   • Interchange-revenue audit log fires on positive-revenue events.
  *   • Card status enum coercion + unknown-card 202 ACK.
  */
@@ -72,8 +75,9 @@ jest.mock('@config/redis', () => {
 
 jest.mock('@config/prisma', () => {
   const tx = {
+    $queryRaw: jest.fn(),
     employee: { update: jest.fn() },
-    employeeTransaction: { create: jest.fn(), update: jest.fn() },
+    employeeTransaction: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
     card: { update: jest.fn() },
     auditLog: { create: jest.fn() },
   };
@@ -108,8 +112,9 @@ const mocked = prisma as unknown as {
   auditLog: { create: jest.Mock };
   $transaction: jest.Mock;
   __tx: {
+    $queryRaw: jest.Mock;
     employee: { update: jest.Mock };
-    employeeTransaction: { create: jest.Mock; update: jest.Mock };
+    employeeTransaction: { findUnique: jest.Mock; create: jest.Mock; update: jest.Mock };
     card: { update: jest.Mock };
     auditLog: { create: jest.Mock };
   };
@@ -402,6 +407,43 @@ describe('MoneyHashRemittanceWebhook /status', () => {
   // The mocked env pins NODE_ENV='production' and the MoneyHash secret
   // so the signature gate runs strictly for these tests.
 
+  /**
+   * `findFirst` only routes the event by transferId. The decision
+   * (TASK-011) is taken on the row re-read by id under the WALLET_DEBIT
+   * lock, and a prior refund is looked up by its idempotency key — both
+   * on the transaction client.
+   */
+  function givenRemittance(row: Record<string, unknown>, refund: unknown = null): void {
+    const stored = { id: 'txn-orig', employeeId: 'emp-1', type: 'REMITTANCE', totalAmount: 500, fee: 5, currency: 'AED', ...row };
+    mocked.employeeTransaction.findFirst.mockResolvedValue(stored);
+    mocked.__tx.employeeTransaction.findUnique.mockImplementation(async ({ where }: { where: { id?: string } }) =>
+      where.id !== undefined ? stored : refund,
+    );
+  }
+
+  /** pg_advisory_xact_lock(key, WALLET_DEBIT) ran first, then the decisive re-read. */
+  function expectLockedReread(): void {
+    expect(mocked.__tx.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(mocked.__tx.$queryRaw.mock.calls[0].slice(1)).toEqual([expect.any(Number), 3]);
+    expect(mocked.__tx.employeeTransaction.findUnique).toHaveBeenNthCalledWith(1, { where: { id: 'txn-orig' } });
+    expect(mocked.__tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      mocked.__tx.employeeTransaction.findUnique.mock.invocationCallOrder[0],
+    );
+  }
+
+  /** No status change, no refund row, no wallet movement. */
+  function expectNoFinancialWrites(): void {
+    expect(mocked.__tx.employeeTransaction.update).not.toHaveBeenCalled();
+    expect(mocked.__tx.employeeTransaction.create).not.toHaveBeenCalled();
+    expect(mocked.__tx.employee.update).not.toHaveBeenCalled();
+    expect(mocked.employeeTransaction.update).not.toHaveBeenCalled();
+  }
+
+  beforeEach(() => {
+    mocked.__tx.$queryRaw.mockResolvedValue([{ locked: '' }]);
+    mocked.__tx.employeeTransaction.findUnique.mockResolvedValue(null);
+  });
+
   it('rejects when signature is missing entirely', async () => {
     const req: any = { body: Buffer.from('{}'), header: () => undefined };
     const res = buildRes();
@@ -420,15 +462,7 @@ describe('MoneyHashRemittanceWebhook /status', () => {
   });
 
   it('succeeded: marks the original COMPLETED + writes audit log inside one tx', async () => {
-    mocked.employeeTransaction.findFirst.mockResolvedValue({
-      id: 'txn-orig',
-      employeeId: 'emp-1',
-      status: 'PENDING',
-      totalAmount: 500,
-      fee: 5,
-      currency: 'AED',
-      reference: 'tr-success',
-    });
+    givenRemittance({ status: 'PENDING', reference: 'tr-success' });
     mocked.__tx.employeeTransaction.update.mockResolvedValue({});
     mocked.__tx.auditLog.create.mockResolvedValue({});
 
@@ -438,6 +472,9 @@ describe('MoneyHashRemittanceWebhook /status', () => {
 
     expect(res.statusCode).toBe(200);
     expect(mocked.$transaction).toHaveBeenCalledTimes(1);
+    expectLockedReread();
+    expect(mocked.__tx.employeeTransaction.create).not.toHaveBeenCalled();
+    expect(mocked.__tx.employee.update).not.toHaveBeenCalled();
     expect(mocked.__tx.employeeTransaction.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'txn-orig' },
@@ -452,16 +489,8 @@ describe('MoneyHashRemittanceWebhook /status', () => {
   });
 
   it('failed: appends REFUND row + credits wallet + does NOT mutate original amounts', async () => {
-    mocked.employeeTransaction.findFirst.mockResolvedValue({
-      id: 'txn-orig',
-      employeeId: 'emp-1',
-      status: 'PENDING',
-      totalAmount: 500, // original debit magnitude
-      fee: 5,
-      currency: 'AED',
-      reference: 'tr-fail',
-    });
-    mocked.employeeTransaction.findUnique.mockResolvedValue(null); // no prior refund
+    // totalAmount 500 = the original debit magnitude; no prior refund.
+    givenRemittance({ status: 'PENDING', reference: 'tr-fail' });
     mocked.__tx.employeeTransaction.update.mockResolvedValue({});
     mocked.__tx.employeeTransaction.create.mockResolvedValue({ id: 'txn-refund' });
     mocked.__tx.employee.update.mockResolvedValue({});
@@ -477,14 +506,20 @@ describe('MoneyHashRemittanceWebhook /status', () => {
 
     expect(res.statusCode).toBe(200);
     expect(mocked.$transaction).toHaveBeenCalledTimes(1);
+    expectLockedReread();
+    expect(mocked.__tx.employeeTransaction.findUnique).toHaveBeenCalledWith({
+      where: { idempotencyKey: 'moneyhash:refund:tr-fail' },
+    });
 
     // Original marked FAILED — but no amount mutations in the update
+    expect(mocked.__tx.employeeTransaction.update).toHaveBeenCalledTimes(1);
     const updateCall = mocked.__tx.employeeTransaction.update.mock.calls[0][0];
     expect(updateCall.data.status).toBe('FAILED');
     expect(updateCall.data.amount).toBeUndefined();
     expect(updateCall.data.totalAmount).toBeUndefined();
 
-    // Append-only refund row
+    // Append-only refund row — exactly one
+    expect(mocked.__tx.employeeTransaction.create).toHaveBeenCalledTimes(1);
     const refundCreate = mocked.__tx.employeeTransaction.create.mock.calls[0][0].data;
     expect(refundCreate.type).toBe('REFUND');
     expect(refundCreate.amount).toBe(500);
@@ -492,7 +527,8 @@ describe('MoneyHashRemittanceWebhook /status', () => {
     expect(refundCreate.idempotencyKey).toBe('moneyhash:refund:tr-fail');
     expect(refundCreate.reference).toBe('tr-fail');
 
-    // Wallet credit-back
+    // Wallet credit-back — exactly once
+    expect(mocked.__tx.employee.update).toHaveBeenCalledTimes(1);
     expect(mocked.__tx.employee.update).toHaveBeenCalledWith({
       where: { id: 'emp-1' },
       data: { walletBalance: { increment: 500 } },
@@ -506,71 +542,116 @@ describe('MoneyHashRemittanceWebhook /status', () => {
   });
 
   it('failed (replay): if a refund row already exists, no second refund is created', async () => {
-    mocked.employeeTransaction.findFirst.mockResolvedValue({
-      id: 'txn-orig',
-      employeeId: 'emp-1',
-      status: 'PENDING',
-      totalAmount: 500,
-      fee: 5,
-      currency: 'AED',
-      reference: 'tr-replay',
-    });
-    // Prior refund found via the idempotency key lookup
-    mocked.employeeTransaction.findUnique.mockResolvedValue({ id: 'txn-refund-existing' });
+    // Prior refund found via the idempotency key lookup, under the lock
+    givenRemittance({ status: 'PENDING', reference: 'tr-replay' }, { id: 'txn-refund-existing' });
+    mocked.__tx.employeeTransaction.update.mockResolvedValue({});
 
     const req = signedReq({ transferId: 'tr-replay', status: 'failed' });
     const res = buildRes();
     await invokeRoute(moneyHashRemittanceWebhook.router, '/status', req, res);
 
     expect(res.statusCode).toBe(200);
-    expect(mocked.$transaction).not.toHaveBeenCalled();
+    expectLockedReread();
+    expect(mocked.__tx.employeeTransaction.create).not.toHaveBeenCalled();
+    expect(mocked.__tx.employee.update).not.toHaveBeenCalled();
   });
 
   it('succeeded → already COMPLETED: replay is a no-op', async () => {
-    mocked.employeeTransaction.findFirst.mockResolvedValue({
-      id: 'txn-orig',
-      employeeId: 'emp-1',
-      status: 'COMPLETED',
-      totalAmount: 500,
-      fee: 5,
-      currency: 'AED',
-      reference: 'tr-already-done',
-    });
+    givenRemittance({ status: 'COMPLETED', reference: 'tr-already-done' });
 
     const req = signedReq({ transferId: 'tr-already-done', status: 'succeeded' });
     const res = buildRes();
     await invokeRoute(moneyHashRemittanceWebhook.router, '/status', req, res);
 
     expect(res.statusCode).toBe(200);
-    expect(mocked.$transaction).not.toHaveBeenCalled();
+    expectLockedReread();
+    expectNoFinancialWrites();
+    expect(mocked.__tx.auditLog.create).not.toHaveBeenCalled();
   });
 
   it('success-after-failure conflict: audit-logged but NEVER auto-reconciled', async () => {
-    mocked.employeeTransaction.findFirst.mockResolvedValue({
-      id: 'txn-orig',
-      employeeId: 'emp-1',
-      status: 'FAILED', // already refunded earlier
-      totalAmount: 500,
-      fee: 5,
-      currency: 'AED',
-      reference: 'tr-conflict',
-    });
-    mocked.auditLog.create.mockResolvedValue({});
+    // Already failed and refunded earlier
+    givenRemittance({ status: 'FAILED', reference: 'tr-conflict' }, { id: 'txn-refund' });
 
     const req = signedReq({ transferId: 'tr-conflict', status: 'succeeded' });
     const res = buildRes();
     await invokeRoute(moneyHashRemittanceWebhook.router, '/status', req, res);
 
     expect(res.statusCode).toBe(200);
-    expect(mocked.$transaction).not.toHaveBeenCalled();
-    // Conflict surfaced via top-level audit log, NOT inside a tx
-    expect(mocked.auditLog.create).toHaveBeenCalledWith(
+    expectLockedReread();
+    expectNoFinancialWrites();
+    // Conflict surfaced in the same locked transaction that read the state
+    expect(mocked.__tx.auditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           action: 'REMITTANCE_SUCCESS_AFTER_FAILURE_CONFLICT',
+          metadata: expect.objectContaining({ currentStatus: 'FAILED', refundIssued: true }),
         }),
       }),
     );
+  });
+
+  // TASK-011: a remittance MoneyHash confirmed is never credited back.
+  it.each(['failed', 'reversed'] as const)(
+    '%s after COMPLETED: no refund, no wallet credit — conflict audited',
+    async (status) => {
+      givenRemittance({ status: 'COMPLETED', reference: 'tr-settled' });
+
+      const req = signedReq({ transferId: 'tr-settled', status, failureReason: 'beneficiary_bank_returned' });
+      const res = buildRes();
+      await invokeRoute(moneyHashRemittanceWebhook.router, '/status', req, res);
+
+      expect(res.statusCode).toBe(200);
+      expectLockedReread();
+      expectNoFinancialWrites();
+      expect(mocked.__tx.auditLog.create).toHaveBeenCalledTimes(1);
+      expect(mocked.__tx.auditLog.create.mock.calls[0][0].data).toMatchObject({
+        action: 'REMITTANCE_FAILURE_AFTER_COMPLETION_CONFLICT',
+        resourceId: 'txn-orig',
+        metadata: { currentStatus: 'COMPLETED', event: status, failureCode: 'beneficiary_bank_returned' },
+      });
+    },
+  );
+
+  it('decides on the row re-read under the lock, not on the earlier routing lookup', async () => {
+    givenRemittance({ status: 'COMPLETED', reference: 'tr-race' });
+    // The routing read saw PENDING; a success committed before the lock was granted.
+    mocked.employeeTransaction.findFirst.mockResolvedValue({
+      id: 'txn-orig', employeeId: 'emp-1', type: 'REMITTANCE', status: 'PENDING', totalAmount: 500, fee: 5, currency: 'AED', reference: 'tr-race',
+    });
+
+    const req = signedReq({ transferId: 'tr-race', status: 'failed' });
+    const res = buildRes();
+    await invokeRoute(moneyHashRemittanceWebhook.router, '/status', req, res);
+
+    expect(res.statusCode).toBe(200);
+    expectLockedReread();
+    expectNoFinancialWrites();
+    expect(mocked.__tx.auditLog.create.mock.calls[0][0].data.action).toBe(
+      'REMITTANCE_FAILURE_AFTER_COMPLETION_CONFLICT',
+    );
+  });
+
+  it('conflict audits carry identifiers and codes only — no free text or amounts', async () => {
+    givenRemittance({ status: 'COMPLETED', reference: 'tr-audit' });
+
+    const req = signedReq({
+      transferId: 'tr-audit',
+      status: 'reversed',
+      providerReference: 'mh-prov-9',
+      failureReason: 'Account of Test Person, IBAN AE00 0000 0000 0000 0000 000, closed',
+    });
+    const res = buildRes();
+    await invokeRoute(moneyHashRemittanceWebhook.router, '/status', req, res);
+
+    expect(mocked.__tx.auditLog.create.mock.calls[0][0].data.metadata).toEqual({
+      transferId: 'tr-audit',
+      providerReference: 'mh-prov-9',
+      currentStatus: 'COMPLETED',
+      event: 'reversed',
+      failureCode: 'unspecified',
+      detectedUnderLock: true,
+    });
   });
 
   it('unknown transferId returns 202 (no retry storm) without DB writes', async () => {
@@ -584,15 +665,7 @@ describe('MoneyHashRemittanceWebhook /status', () => {
   });
 
   it('accepts the new-style { type, data } payload variant', async () => {
-    mocked.employeeTransaction.findFirst.mockResolvedValue({
-      id: 'txn-orig',
-      employeeId: 'emp-1',
-      status: 'PENDING',
-      totalAmount: 500,
-      fee: 5,
-      currency: 'AED',
-      reference: 'tr-new-style',
-    });
+    givenRemittance({ status: 'PENDING', reference: 'tr-new-style' });
     mocked.__tx.employeeTransaction.update.mockResolvedValue({});
     mocked.__tx.auditLog.create.mockResolvedValue({});
 

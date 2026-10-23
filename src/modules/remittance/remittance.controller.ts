@@ -46,6 +46,8 @@ export class RemittanceController {
       req.body.amount,
       req.body.currency.toUpperCase(),
       req.body.beneficiary,
+      // TASK-011: at most one remittance per key, enforced by a unique column.
+      { idempotencyKey: req.header('idempotency-key') || undefined },
     );
     res.json(result);
   };

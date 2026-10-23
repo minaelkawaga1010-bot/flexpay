@@ -17,8 +17,9 @@
 
 jest.mock('@config/prisma', () => {
   const tx = {
+    $queryRaw: jest.fn().mockResolvedValue([{ locked: '' }]),
     employee: { update: jest.fn() },
-    employeeTransaction: { create: jest.fn(), update: jest.fn() },
+    employeeTransaction: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
     card: { update: jest.fn() },
     auditLog: { create: jest.fn() },
   };
@@ -445,10 +446,10 @@ describe('moneyhash timestamp window', () => {
 describe('replay attempts', () => {
   it('moneyhash: an identical replay is acknowledged without a second refund', async () => {
     const transferId = uid('tr');
-    w.prisma.employeeTransaction.findFirst.mockResolvedValue({
-      id: 'txn-1', employeeId: 'emp-1', status: 'PENDING', totalAmount: 500, fee: 5, currency: 'AED', reference: transferId,
-    });
-    w.prisma.employeeTransaction.findUnique.mockResolvedValue(null); // the business guard alone would not stop it
+    const row = { id: 'txn-1', employeeId: 'emp-1', type: 'REMITTANCE', status: 'PENDING', totalAmount: 500, fee: 5, currency: 'AED', reference: transferId };
+    w.prisma.employeeTransaction.findFirst.mockResolvedValue(row);
+    // Always PENDING, never a refund: the business guard alone would not stop it
+    w.prisma.__tx.employeeTransaction.findUnique.mockImplementation(async ({ where }: any) => (where.id ? row : null));
     w.prisma.__tx.employeeTransaction.create.mockResolvedValue({ id: 'refund-1' });
     const raw = JSON.stringify({ transferId, status: 'failed' });
     const headers = { 'MoneyHash-Signature': moneyHashHeader(raw) };
@@ -513,10 +514,11 @@ describe('replay attempts', () => {
 describe('duplicate and concurrent delivery', () => {
   it('moneyhash: a provider retry with a fresh signature authenticates but cannot refund twice', async () => {
     const transferId = uid('tr');
-    const row = { id: 'txn-1', employeeId: 'emp-1', status: 'PENDING', totalAmount: 500, fee: 5, currency: 'AED', reference: transferId };
+    const row = { id: 'txn-1', employeeId: 'emp-1', type: 'REMITTANCE', status: 'PENDING', totalAmount: 500, fee: 5, currency: 'AED', reference: transferId };
     let refund: unknown = null;
     w.prisma.employeeTransaction.findFirst.mockImplementation(async () => ({ ...row }));
-    w.prisma.employeeTransaction.findUnique.mockImplementation(async () => refund);
+    // Re-read by id under the lock; refund looked up by its idempotency key.
+    w.prisma.__tx.employeeTransaction.findUnique.mockImplementation(async ({ where }: any) => (where.id ? { ...row } : refund));
     w.prisma.__tx.employeeTransaction.update.mockImplementation(async ({ data }: any) => Object.assign(row, data));
     w.prisma.__tx.employeeTransaction.create.mockImplementation(async ({ data }: any) => (refund = { id: 'refund-1', ...data }));
     const raw = JSON.stringify({ transferId, status: 'failed' });
@@ -775,7 +777,9 @@ describe('logging hygiene', () => {
     w.prisma.card.findUnique.mockResolvedValue({ id: 'card-1', cardId: 'nym-1', employeeId: 'emp-1', dailyLimit: 1, monthlyLimit: 1, spentToday: 0, spentThisMonth: 0, updatedAt: new Date(), employee: { walletBalance: 1e6 } });
     w.prisma.employee.findUnique.mockResolvedValue({ id: 'emp-1', plan: 'BASIC', walletBalance: 0 });
     w.prisma.employeeTransaction.findUnique.mockResolvedValue(null);
-    w.prisma.employeeTransaction.findFirst.mockResolvedValue({ id: 'txn-1', employeeId: 'emp-1', status: 'PENDING', totalAmount: amount, fee: 0, currency: 'AED', reference: 'tr' });
+    const remittance = { id: 'txn-1', employeeId: 'emp-1', type: 'REMITTANCE', status: 'PENDING', totalAmount: amount, fee: 0, currency: 'AED', reference: 'tr' };
+    w.prisma.employeeTransaction.findFirst.mockResolvedValue(remittance);
+    w.prisma.__tx.employeeTransaction.findUnique.mockImplementation(async ({ where }: any) => (where.id ? remittance : null));
     w.prisma.__tx.employeeTransaction.create.mockResolvedValue({ id: 'refund-1' });
     w.prisma.loan.findFirst.mockResolvedValue(null);
     w.prisma.billPayment.findFirst.mockResolvedValue({ id: 'bp-1', status: 'PENDING' });
