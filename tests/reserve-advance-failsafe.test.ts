@@ -20,7 +20,8 @@ jest.mock('@config/prisma', () => {
     payrollCycle: { findUnique: jest.fn() },
     payrollIntent: { findUnique: jest.fn() },
     company: { findUnique: jest.fn() },
-    advance: { create: jest.fn() },
+    // TASK-009: prior advances in the cycle (none unless a test seeds them).
+    advance: { create: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
     ledgerEntry: { create: jest.fn() },
   };
   return {
@@ -42,7 +43,7 @@ const mocked = prisma as unknown as {
     payrollCycle: { findUnique: jest.Mock };
     payrollIntent: { findUnique: jest.Mock };
     company: { findUnique: jest.Mock };
-    advance: { create: jest.Mock };
+    advance: { create: jest.Mock; findMany: jest.Mock };
     ledgerEntry: { create: jest.Mock };
   };
 };
@@ -76,6 +77,7 @@ function seedCommonReads(opts: {
     employeeId: 'emp-1',
     accruedAmount: opts.accrued,
     currency: 'AED',
+    status: 'PENDING',
   });
   mocked.__tx.company.findUnique.mockResolvedValue({
     ewaFailsafeActive: opts.failsafeActive,

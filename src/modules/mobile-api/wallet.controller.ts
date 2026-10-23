@@ -162,6 +162,9 @@ export class MobileWalletController {
       dcseModelVersion: DCSE_MODEL_VERSION,
       dcseLimitAtReq: score.maxEWAAmount,
       dcseRiskScoreAtReq: score.score,
+      // TASK-009: at most one advance per key, enforced atomically in the
+      // service (the shared idempotency middleware is not atomic).
+      idempotencyKey: req.header('idempotency-key') || undefined,
     });
 
     logger.info('mobile advance reserved', {
