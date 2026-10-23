@@ -6,6 +6,7 @@ import { env } from '@config/env';
 import { authenticate, AuthRequest } from '@shared/middleware/auth';
 import { validate } from '@shared/middleware/validator';
 import { asyncHandler } from '@shared/utils/asyncHandler';
+import { idempotency } from '@shared/utils/idempotency';
 import { BadRequest, NotFound } from '@shared/utils/errors';
 import logger from '@shared/utils/logger';
 import { cardsService } from '@modules/cards/cards.service';
@@ -71,6 +72,11 @@ export class MobileWalletController {
     // ───────────── Transactional ─────────────
     this.router.post(
       '/advance/request',
+      // TASK-013: idempotency sits after the router-level authenticate() +
+      // deviceBinding and before the per-request factors, so a replay of the
+      // same principal's same request returns the cached result without
+      // re-consuming a single-use step-up OTP.
+      idempotency,
       requireBiometrics,
       requireStepUpOtp('ADVANCE'),
       validate(advanceRequestSchema),
@@ -85,6 +91,8 @@ export class MobileWalletController {
     );
     this.router.post(
       '/remittance/send',
+      // TASK-013: idempotency after router-level authenticate() + deviceBinding.
+      idempotency,
       requireBiometrics,
       requireStepUpOtp('REMITTANCE'),
       validate(remittanceSendSchema),

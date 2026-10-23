@@ -109,7 +109,11 @@ export class BillPaymentController {
       billerType,
       billerAccountRef,
       amount,
-      idempotencyKey,
+      // TASK-013: scope the DB-unique idempotency key to the authenticated
+      // employee so two users supplying the same key cannot collide (the
+      // pre-flight lookup is by key alone). Wiring only — payBill and the
+      // schema are unchanged.
+      idempotencyKey: `bill:${req.user!.id}:${idempotencyKey}`,
       metadata,
     });
     res.status(201).json({ bill });

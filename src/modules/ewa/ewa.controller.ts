@@ -5,6 +5,7 @@ import { env } from '@config/env';
 import { authenticate, AuthRequest } from '@shared/middleware/auth';
 import { validate } from '@shared/middleware/validator';
 import { asyncHandler } from '@shared/utils/asyncHandler';
+import { idempotency } from '@shared/utils/idempotency';
 import { BadRequest, NotFound } from '@shared/utils/errors';
 import { creditScoringService } from '@modules/scoring/scoring.service';
 import { flexxPayService } from './flexxpay.service';
@@ -21,6 +22,9 @@ export class EwaController {
     this.router.post(
       '/request',
       authenticate('employee'),
+      // TASK-013: idempotency runs only after authenticate(), so the record
+      // is scoped to the authenticated employee.
+      idempotency,
       validate(advanceSchema),
       asyncHandler(this.requestAdvance),
     );
