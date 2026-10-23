@@ -42,7 +42,28 @@ import {
  *      throws or returns `failed` synchronously, run the refund flow
  *      (append-only): mark BillPayment FAILED, create a REFUND
  *      EmployeeTransaction, credit the wallet back. The refund is
- *      idempotent on `bill:refund:<key>`.
+ *      idempotent on `bill:refund:<key>`. A synchronous `completed`
+ *      runs the same settlement path as the webhook.
+ *
+ * Status lifecycle (TASK-010). Every transition is decided on a fresh
+ * read under the employee's WALLET_DEBIT advisory lock, inside the
+ * transaction that writes it:
+ *
+ *   PENDING ──settle──▶ COMPLETED   rail confirmed (webhook or synchronous adapter)
+ *   PENDING ──refund──▶ FAILED      rail or adapter failure; one REFUND credits the wallet
+ *
+ * COMPLETED and FAILED (and REVERSED, which nothing produces today) are
+ * terminal for automatic processing. A contradictory late event —
+ * failure or reversal after COMPLETED, success after FAILED — changes
+ * no status or balance and leaves a *_CONFLICT audit row for ops.
+ * Crediting a settled bill would need a provider-verified reversal
+ * workflow, which does not exist.
+ *
+ * Financial invariants per bill:
+ *   • at most one REFUND row (unique `bill:refund:<key>`)
+ *   • COMPLETED ⇒ no REFUND row; a REFUND row ⇒ FAILED / REVERSED
+ *   • wallet effect: PENDING and COMPLETED −totalAmount, FAILED 0
+ *   • the BILL_PAYMENT wallet txn mirrors the bill status
  *
  * Invariants:
  *   • A successful return from payBill() ⇒ wallet has been debited
@@ -236,18 +257,18 @@ export async function payBill(input: PayBillInput): Promise<BillPayment> {
     return refundFailedBill(bill, dispatch.failureReason ?? 'adapter_rejected', dispatch.externalRef);
   }
 
-  // Adapter succeeded (pending or completed). Persist the rail ref.
+  // A synchronous completion (rare) is a settlement: take the webhook's
+  // locked, fresh-state path, which also completes the wallet txn —
+  // never a blind status write outside the lock.
+  if (dispatch.status === 'completed') {
+    return settleBillPayment(bill, dispatch.externalRef, 'bill-payment:adapter');
+  }
+
+  // Pending: persist the rail ref so the webhook can find the bill. No
+  // status change here.
   return prisma.billPayment.update({
     where: { id: bill.id },
-    data: {
-      externalRef: dispatch.externalRef,
-      // If the adapter is synchronous-completed (rare), reflect it
-      // immediately so the dashboard isn't stuck on PENDING waiting
-      // for a webhook the rail won't send.
-      ...(dispatch.status === 'completed'
-        ? { status: BillPaymentStatus.COMPLETED, processedAt: new Date() }
-        : {}),
-    },
+    data: { externalRef: dispatch.externalRef },
   });
 }
 
@@ -261,6 +282,10 @@ export async function payBill(input: PayBillInput): Promise<BillPayment> {
  * refund-side idempotency key (`bill:refund:<key>`) prevents
  * double-refund across concurrent or retried failure paths.
  *
+ * Only a PENDING bill is refunded, judged on the row re-read under the
+ * lock (TASK-010): a bill that settled meanwhile is never credited — the
+ * late failure is audited as a conflict instead.
+ *
  * Exported for the webhook handler — same flow whether the failure
  * comes synchronously from the adapter or asynchronously from the
  * biller webhook.
@@ -270,168 +295,203 @@ export async function refundFailedBill(
   failureReason: string,
   externalRef?: string,
 ): Promise<BillPayment> {
+  // FAILED / REVERSED are terminal, so even a stale snapshot is final.
   if (bill.status === BillPaymentStatus.FAILED || bill.status === BillPaymentStatus.REVERSED) {
     return bill;
   }
 
-  const refundKey = refundIdempotencyKey(bill.idempotencyKey);
-
-  // Fast path (no transaction): an obvious prior refund — heal the bill
-  // row and return. Not the authoritative guard; the in-lock re-read and
-  // the unique constraint below are.
-  const prior = await prisma.employeeTransaction.findUnique({
-    where: { idempotencyKey: refundKey },
-  });
-  if (prior) {
-    logger.info('bill-payment: refund already issued, healing bill row', {
-      billPaymentId: bill.id,
-      refundId: prior.id,
-    });
-    return prisma.billPayment.update({
-      where: { id: bill.id },
-      data: {
-        status: BillPaymentStatus.FAILED,
-        failureReason,
-        refundTransactionId: prior.id,
-        processedAt: new Date(),
-        ...(externalRef ? { externalRef } : {}),
-      },
-    });
-  }
-
   try {
-    return await prisma.$transaction(
-      async (tx: Prisma.TransactionClient): Promise<BillPayment> => {
-        await acquireWorkerLockScoped(tx, bill.employeeId, LockScope.WALLET_DEBIT);
+    return await refundUnderLock(bill, failureReason, externalRef);
+  } catch (err) {
+    // Database-uniqueness backstop on `bill:refund:<key>`: a refund row
+    // committed by a writer the advisory lock did not serialize (none
+    // exist today). Decide again under the lock — the second pass sees
+    // that row and takes the no-op / heal / conflict branch, never a
+    // second credit.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      logger.warn('bill-payment: refund unique-key race — deciding again under the lock', {
+        billPaymentId: bill.id,
+      });
+      return refundUnderLock(bill, failureReason, externalRef);
+    }
+    throw err;
+  }
+}
 
-        // Re-read UNDER the lock. A concurrent refund (e.g. the sync
-        // adapter-failure path racing the async biller webhook) that
-        // committed while we waited on the advisory lock is now visible
-        // → heal instead of inserting a duplicate that would trip the
-        // `bill:refund:<key>` unique index. This is the transactional
-        // guarantee that removes the P2002 under normal concurrency.
-        const existing = await tx.employeeTransaction.findUnique({
-          where: { idempotencyKey: refundKey },
+/** Audit-safe form of an adapter / provider reason: a code-like token, never free text. */
+function reasonCode(reason: string): string {
+  return /^[A-Za-z0-9_.:-]{1,64}$/.test(reason) ? reason : 'unspecified';
+}
+
+async function refundUnderLock(
+  bill: BillPayment,
+  failureReason: string,
+  externalRef?: string,
+): Promise<BillPayment> {
+  return prisma.$transaction(
+    async (tx: Prisma.TransactionClient): Promise<BillPayment> => {
+      await acquireWorkerLockScoped(tx, bill.employeeId, LockScope.WALLET_DEBIT);
+
+      // Re-read UNDER the lock and decide on the fresh row: the caller's
+      // snapshot may predate a settlement or a refund (e.g. the sync
+      // adapter-failure path racing the async biller webhook) that
+      // committed while we waited for the lock.
+      const fresh = await tx.billPayment.findUnique({ where: { id: bill.id } });
+      if (!fresh) throw NotFound('Bill payment not found');
+
+      if (fresh.status === BillPaymentStatus.COMPLETED) {
+        // The biller confirmed payment. A late failure or reversal never
+        // credits the wallet; surface it for ops without touching the
+        // settled balances.
+        logger.error('bill-payment: failure after settlement — ops review required', {
+          billPaymentId: fresh.id,
         });
-        if (existing) {
-          return tx.billPayment.update({
-            where: { id: bill.id },
-            data: {
-              status: BillPaymentStatus.FAILED,
-              failureReason,
-              refundTransactionId: existing.id,
-              processedAt: new Date(),
-              ...(externalRef ? { externalRef } : {}),
-            },
-          });
-        }
-
-        // Mark the original PENDING wallet txn FAILED — status only,
-        // amounts are immutable (append-only invariant).
-        if (bill.walletTransactionId) {
-          await tx.employeeTransaction.update({
-            where: { id: bill.walletTransactionId },
-            data: { status: TransactionStatus.FAILED, processedAt: new Date() },
-          });
-        }
-
-        const refundAmount = bill.totalAmount;
-        const refund = await tx.employeeTransaction.create({
-          data: {
-            employeeId: bill.employeeId,
-            type: TransactionType.REFUND,
-            amount: refundAmount,
-            fee: 0,
-            totalAmount: refundAmount,
-            currency: bill.currency,
-            status: TransactionStatus.COMPLETED,
-            description: `Refund for failed bill ${bill.billerType} (${bill.billerAccountRef}): ${failureReason}`,
-            reference: bill.id,
-            merchantName: bill.billerType,
-            merchantCategory: 'UTILITY',
-            idempotencyKey: refundKey,
-            processedAt: new Date(),
-          },
-        });
-
-        await tx.employee.update({
-          where: { id: bill.employeeId },
-          data: { walletBalance: { increment: refundAmount } },
-        });
-
-        const updated = await tx.billPayment.update({
-          where: { id: bill.id },
-          data: {
-            status: BillPaymentStatus.FAILED,
-            failureReason,
-            refundTransactionId: refund.id,
-            processedAt: new Date(),
-            ...(externalRef ? { externalRef } : {}),
-          },
-        });
-
         await tx.auditLog.create({
           data: {
             actorType: 'system',
             actorId: 'bill-payment:refund',
-            action: 'BILL_PAYMENT_FAILED_AND_REFUNDED',
+            action: 'BILL_PAYMENT_FAILURE_AFTER_SETTLEMENT_CONFLICT',
             resourceType: 'BillPayment',
-            resourceId: bill.id,
+            resourceId: fresh.id,
             metadata: {
-              refundId: refund.id,
-              refundAmount,
-              failureReason,
+              currentStatus: fresh.status,
+              settledExternalRef: fresh.externalRef,
+              eventExternalRef: externalRef ?? null,
+              failureCode: reasonCode(failureReason),
+              detectedUnderLock: true,
             } as Prisma.InputJsonValue,
           },
         });
+        return fresh;
+      }
+      if (fresh.status !== BillPaymentStatus.PENDING) {
+        // FAILED / REVERSED: already final — a duplicate failure is a no-op.
+        return fresh;
+      }
 
-        return updated;
-      },
-      { timeout: 30_000 },
-    );
-  } catch (err) {
-    // Database-uniqueness backstop. If a refund row appeared between the
-    // in-lock read and the insert (practically impossible while we hold
-    // the advisory lock, but the unique index is the ultimate guarantee),
-    // Prisma throws P2002. Treat it as an idempotent no-op: the money was
-    // credited exactly once by the winner; we only heal the bill row.
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-      const winner = await prisma.employeeTransaction.findUnique({
+      const refundKey = refundIdempotencyKey(fresh.idempotencyKey);
+      const existing = await tx.employeeTransaction.findUnique({
         where: { idempotencyKey: refundKey },
       });
-      if (winner) {
-        logger.info('bill-payment: refund P2002 race resolved as idempotent no-op', {
-          billPaymentId: bill.id,
-          refundId: winner.id,
-        });
-        return prisma.billPayment.update({
-          where: { id: bill.id },
+      if (existing) {
+        // A refund row whose bill is still PENDING (a partial earlier
+        // state): finish the transition without crediting again.
+        return tx.billPayment.update({
+          where: { id: fresh.id },
           data: {
             status: BillPaymentStatus.FAILED,
             failureReason,
-            refundTransactionId: winner.id,
+            refundTransactionId: existing.id,
             processedAt: new Date(),
             ...(externalRef ? { externalRef } : {}),
           },
         });
       }
-    }
-    throw err;
-  }
+
+      // Mark the original PENDING wallet txn FAILED — status only,
+      // amounts are immutable (append-only invariant).
+      if (fresh.walletTransactionId) {
+        await tx.employeeTransaction.update({
+          where: { id: fresh.walletTransactionId },
+          data: { status: TransactionStatus.FAILED, processedAt: new Date() },
+        });
+      }
+
+      const refundAmount = fresh.totalAmount;
+      const refund = await tx.employeeTransaction.create({
+        data: {
+          employeeId: fresh.employeeId,
+          type: TransactionType.REFUND,
+          amount: refundAmount,
+          fee: 0,
+          totalAmount: refundAmount,
+          currency: fresh.currency,
+          status: TransactionStatus.COMPLETED,
+          description: `Refund for failed bill ${fresh.billerType} (${fresh.billerAccountRef}): ${failureReason}`,
+          reference: fresh.id,
+          merchantName: fresh.billerType,
+          merchantCategory: 'UTILITY',
+          idempotencyKey: refundKey,
+          processedAt: new Date(),
+        },
+      });
+
+      await tx.employee.update({
+        where: { id: fresh.employeeId },
+        data: { walletBalance: { increment: refundAmount } },
+      });
+
+      const updated = await tx.billPayment.update({
+        where: { id: fresh.id },
+        data: {
+          status: BillPaymentStatus.FAILED,
+          failureReason,
+          refundTransactionId: refund.id,
+          processedAt: new Date(),
+          ...(externalRef ? { externalRef } : {}),
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorType: 'system',
+          actorId: 'bill-payment:refund',
+          action: 'BILL_PAYMENT_FAILED_AND_REFUNDED',
+          resourceType: 'BillPayment',
+          resourceId: fresh.id,
+          metadata: {
+            refundId: refund.id,
+            refundAmount,
+            failureReason,
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      return updated;
+    },
+    { timeout: 30_000 },
+  );
 }
 
 // ───────────────────────────────────────────────────────────────────
 // Settlement (webhook side)
 // ───────────────────────────────────────────────────────────────────
 
+/** Ops evidence for a success event on a bill that already failed (no reconciliation). */
+async function recordSuccessAfterFailure(
+  client: Pick<Prisma.TransactionClient, 'auditLog'>,
+  bill: BillPayment,
+  externalRef: string,
+  actorId: string,
+  context: Record<string, boolean>,
+): Promise<void> {
+  logger.error('bill-payment: settle after terminal failure — ops review required', {
+    billPaymentId: bill.id,
+    currentStatus: bill.status,
+    externalRef,
+  });
+  await client.auditLog.create({
+    data: {
+      actorType: 'system',
+      actorId,
+      action: 'BILL_PAYMENT_SUCCESS_AFTER_FAILURE_CONFLICT',
+      resourceType: 'BillPayment',
+      resourceId: bill.id,
+      metadata: { externalRef, currentStatus: bill.status, ...context } as Prisma.InputJsonValue,
+    },
+  });
+}
+
 /**
- * Mark a BillPayment COMPLETED on inbound biller confirmation. The
- * linked wallet EmployeeTransaction transitions PENDING → COMPLETED.
- * Idempotent: a replay on an already-COMPLETED row is a no-op.
+ * Mark a BillPayment COMPLETED on inbound biller confirmation (or a
+ * synchronous adapter completion). The linked wallet EmployeeTransaction
+ * transitions PENDING → COMPLETED. Idempotent: a replay on an
+ * already-COMPLETED row is a no-op.
  */
 export async function settleBillPayment(
   bill: BillPayment,
   externalRef: string,
+  actorId = 'webhook:biller',
 ): Promise<BillPayment> {
   if (bill.status === BillPaymentStatus.COMPLETED) {
     return bill;
@@ -441,24 +501,7 @@ export async function settleBillPayment(
     // bill. Surface for ops review; do NOT auto-reconcile (that would
     // create a phantom debit because the wallet was already credited
     // back).
-    logger.error('bill-payment: settle after terminal failure — ops review required', {
-      billPaymentId: bill.id,
-      currentStatus: bill.status,
-      externalRef,
-    });
-    await prisma.auditLog.create({
-      data: {
-        actorType: 'system',
-        actorId: 'webhook:biller',
-        action: 'BILL_PAYMENT_SUCCESS_AFTER_FAILURE_CONFLICT',
-        resourceType: 'BillPayment',
-        resourceId: bill.id,
-        metadata: {
-          externalRef,
-          currentStatus: bill.status,
-        } as Prisma.InputJsonValue,
-      },
-    });
+    await recordSuccessAfterFailure(prisma, bill, externalRef, actorId, {});
     return bill;
   }
 
@@ -482,38 +525,33 @@ export async function settleBillPayment(
       // A refund committed between the caller's snapshot and this lock.
       // Surface the conflict for ops; do NOT reconcile (the wallet was
       // already credited back).
-      logger.error('bill-payment: settle after concurrent terminal failure — ops review required', {
-        billPaymentId: bill.id,
-        currentStatus: fresh.status,
-        externalRef,
-      });
-      await tx.auditLog.create({
-        data: {
-          actorType: 'system',
-          actorId: 'webhook:biller',
-          action: 'BILL_PAYMENT_SUCCESS_AFTER_FAILURE_CONFLICT',
-          resourceType: 'BillPayment',
-          resourceId: bill.id,
-          metadata: {
-            externalRef,
-            currentStatus: fresh.status,
-            detectedUnderLock: true,
-          } as Prisma.InputJsonValue,
-        },
+      await recordSuccessAfterFailure(tx, fresh, externalRef, actorId, { detectedUnderLock: true });
+      return fresh;
+    }
+
+    // TASK-010: a refund row means the wallet was already credited back —
+    // settling on top of it would make a completed-and-refunded bill.
+    const refund = await tx.employeeTransaction.findUnique({
+      where: { idempotencyKey: refundIdempotencyKey(fresh.idempotencyKey) },
+    });
+    if (refund) {
+      await recordSuccessAfterFailure(tx, fresh, externalRef, actorId, {
+        detectedUnderLock: true,
+        refundIssued: true,
       });
       return fresh;
     }
 
-    // fresh.status === PENDING → safe to settle.
-    if (bill.walletTransactionId) {
+    // fresh.status === PENDING, nothing refunded → safe to settle.
+    if (fresh.walletTransactionId) {
       await tx.employeeTransaction.update({
-        where: { id: bill.walletTransactionId },
+        where: { id: fresh.walletTransactionId },
         data: { status: TransactionStatus.COMPLETED, processedAt: new Date() },
       });
     }
 
     const updated = await tx.billPayment.update({
-      where: { id: bill.id },
+      where: { id: fresh.id },
       data: {
         status: BillPaymentStatus.COMPLETED,
         externalRef,
@@ -524,10 +562,10 @@ export async function settleBillPayment(
     await tx.auditLog.create({
       data: {
         actorType: 'system',
-        actorId: 'webhook:biller',
+        actorId,
         action: 'BILL_PAYMENT_COMPLETED',
         resourceType: 'BillPayment',
-        resourceId: bill.id,
+        resourceId: fresh.id,
         metadata: { externalRef } as Prisma.InputJsonValue,
       },
     });

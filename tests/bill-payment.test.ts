@@ -105,6 +105,17 @@ function buildBillRow(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Lookups default to "nothing found" so every branch is driven
+  // explicitly; clearAllMocks alone keeps stale resolved values.
+  for (const lookup of [
+    mocked.billPayment.findUnique,
+    mocked.employeeTransaction.findUnique,
+    mocked.__tx.billPayment.findUnique,
+    mocked.__tx.employeeTransaction.findUnique,
+  ]) {
+    lookup.mockReset();
+    lookup.mockResolvedValue(null);
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -257,19 +268,19 @@ describe('payBill — happy path', () => {
     );
   });
 
-  it('marks the bill COMPLETED immediately if the adapter returns synchronous completion', async () => {
+  it('settles through the locked settlement path if the adapter returns synchronous completion', async () => {
     stubAdapter({ externalRef: 'rail-ref-sync', status: 'completed' });
 
-    mocked.billPayment.findUnique.mockResolvedValue(null);
     mocked.__tx.employee.findUnique.mockResolvedValue({ id: 'emp-1', walletBalance: 1_000 });
     mocked.__tx.billPayment.create.mockResolvedValue(buildBillRow({ walletTransactionId: null }));
     mocked.__tx.employeeTransaction.create.mockResolvedValue({ id: 'et-1' });
     mocked.__tx.employee.update.mockResolvedValue({});
-    mocked.__tx.billPayment.update.mockResolvedValue(buildBillRow());
+    mocked.__tx.billPayment.update
+      .mockResolvedValueOnce(buildBillRow()) // initial tx: link the wallet txn
+      .mockResolvedValueOnce(buildBillRow({ externalRef: 'rail-ref-sync', status: BillPaymentStatus.COMPLETED }));
     mocked.__tx.auditLog.create.mockResolvedValue({});
-    mocked.billPayment.update.mockResolvedValue(
-      buildBillRow({ externalRef: 'rail-ref-sync', status: BillPaymentStatus.COMPLETED }),
-    );
+    mocked.__tx.billPayment.findUnique.mockResolvedValue(buildBillRow()); // fresh PENDING under the lock
+    mocked.__tx.employeeTransaction.update.mockResolvedValue({});
 
     const out = await payBill({
       employeeId: 'emp-1',
@@ -280,9 +291,22 @@ describe('payBill — happy path', () => {
     });
 
     expect(out.status).toBe(BillPaymentStatus.COMPLETED);
-    const updCall = mocked.billPayment.update.mock.calls[0][0];
-    expect(updCall.data.status).toBe(BillPaymentStatus.COMPLETED);
-    expect(updCall.data.processedAt).toBeInstanceOf(Date);
+    // TASK-010: settled under the lock — bill COMPLETED, wallet txn
+    // COMPLETED, audited as the adapter; no status write outside it.
+    expect(mocked.$transaction).toHaveBeenCalledTimes(2);
+    const settleUpdate = mocked.__tx.billPayment.update.mock.calls[1][0];
+    expect(settleUpdate.data).toMatchObject({ status: BillPaymentStatus.COMPLETED, externalRef: 'rail-ref-sync' });
+    expect(settleUpdate.data.processedAt).toBeInstanceOf(Date);
+    expect(mocked.__tx.employeeTransaction.update).toHaveBeenCalledWith({
+      where: { id: 'et-1' },
+      data: expect.objectContaining({ status: TransactionStatus.COMPLETED }),
+    });
+    expect(mocked.__tx.auditLog.create).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'BILL_PAYMENT_COMPLETED', actorId: 'bill-payment:adapter' }),
+      }),
+    );
+    expect(mocked.billPayment.update).not.toHaveBeenCalled();
   });
 });
 
@@ -383,7 +407,10 @@ describe('payBill — adapter rejection triggers append-only refund', () => {
           idempotencyKey: 'idem-fail',
         }),
       );
-    mocked.employeeTransaction.findUnique.mockResolvedValue(null); // no prior refund
+    // Refund tx re-reads the bill under the lock: still PENDING, no refund yet.
+    mocked.__tx.billPayment.findUnique.mockResolvedValue(
+      buildBillRow({ status: BillPaymentStatus.PENDING, idempotencyKey: 'idem-fail' }),
+    );
 
     const out = await payBill({
       employeeId: 'emp-1',
@@ -429,7 +456,7 @@ describe('payBill — adapter rejection triggers append-only refund', () => {
     mocked.__tx.billPayment.update
       .mockResolvedValueOnce(buildBillRow({ status: BillPaymentStatus.PENDING }))
       .mockResolvedValueOnce(buildBillRow({ status: BillPaymentStatus.FAILED }));
-    mocked.employeeTransaction.findUnique.mockResolvedValue(null);
+    mocked.__tx.billPayment.findUnique.mockResolvedValue(buildBillRow({ status: BillPaymentStatus.PENDING }));
 
     const out = await payBill({
       employeeId: 'emp-1',
@@ -455,10 +482,11 @@ describe('refundFailedBill — idempotency', () => {
     expect(mocked.$transaction).not.toHaveBeenCalled();
   });
 
-  it('heals a partial prior refund (refund row exists, bill row still PENDING)', async () => {
+  it('heals a partial prior refund under the lock (refund row exists, bill row still PENDING) — no second credit', async () => {
     const pending = buildBillRow({ status: BillPaymentStatus.PENDING });
-    mocked.employeeTransaction.findUnique.mockResolvedValue({ id: 'et-prior-refund' });
-    mocked.billPayment.update.mockResolvedValue(
+    mocked.__tx.billPayment.findUnique.mockResolvedValue(pending);
+    mocked.__tx.employeeTransaction.findUnique.mockResolvedValue({ id: 'et-prior-refund' });
+    mocked.__tx.billPayment.update.mockResolvedValue(
       buildBillRow({ status: BillPaymentStatus.FAILED, refundTransactionId: 'et-prior-refund' }),
     );
 
@@ -466,18 +494,19 @@ describe('refundFailedBill — idempotency', () => {
 
     expect(out.status).toBe(BillPaymentStatus.FAILED);
     expect(out.refundTransactionId).toBe('et-prior-refund');
-    // No new tx — we only patched the bill row.
-    expect(mocked.$transaction).not.toHaveBeenCalled();
+    // TASK-010: decided under the lock; only the bill row is patched.
+    expect(acquireWorkerLockScoped).toHaveBeenCalled();
+    expect(mocked.__tx.employeeTransaction.create).not.toHaveBeenCalled();
+    expect(mocked.__tx.employee.update).not.toHaveBeenCalled();
+    expect(mocked.billPayment.update).not.toHaveBeenCalled();
   });
 
-  it('TASK-003: in-lock re-read heals a concurrent refund (pre-check null, but refund committed while awaiting the lock) — no duplicate create', async () => {
+  it('TASK-003: a refund committed while awaiting the lock is seen on the fresh row — no duplicate create', async () => {
     const pending = buildBillRow({ status: BillPaymentStatus.PENDING });
-    // Fast-path pre-check sees nothing...
-    mocked.employeeTransaction.findUnique.mockResolvedValue(null);
-    // ...but once inside the tx (after the advisory lock) a competing
-    // refund is now visible.
-    mocked.__tx.employeeTransaction.findUnique.mockResolvedValue({ id: 'et-winner' });
-    mocked.__tx.billPayment.update.mockResolvedValue(
+    // Caller's snapshot is PENDING, but once inside the tx (after the
+    // advisory lock) the competing refund — FAILED + its REFUND row — is
+    // visible on the re-read.
+    mocked.__tx.billPayment.findUnique.mockResolvedValue(
       buildBillRow({ status: BillPaymentStatus.FAILED, refundTransactionId: 'et-winner' }),
     );
 
@@ -486,18 +515,19 @@ describe('refundFailedBill — idempotency', () => {
     expect(mocked.$transaction).toHaveBeenCalledTimes(1);
     expect(out.status).toBe(BillPaymentStatus.FAILED);
     expect(out.refundTransactionId).toBe('et-winner');
-    // Critical: no second refund row was created (no double credit).
+    // Critical: no second refund row was created (no double credit), and
+    // a duplicate failure writes nothing at all.
     expect(mocked.__tx.employeeTransaction.create).not.toHaveBeenCalled();
     expect(mocked.__tx.employee.update).not.toHaveBeenCalled();
+    expect(mocked.__tx.billPayment.update).not.toHaveBeenCalled();
   });
 
   it('TASK-003: P2002 backstop resolves a unique-violation race as an idempotent no-op (not a 500)', async () => {
     const { Prisma } = jest.requireActual('@prisma/client');
     const pending = buildBillRow({ status: BillPaymentStatus.PENDING });
-    mocked.employeeTransaction.findUnique
-      .mockResolvedValueOnce(null) // fast-path pre-check: nothing
-      .mockResolvedValueOnce({ id: 'et-winner' }); // post-catch lookup: the winner
-    mocked.__tx.employeeTransaction.findUnique.mockResolvedValue(null); // in-lock read: nothing
+    mocked.__tx.billPayment.findUnique
+      .mockResolvedValueOnce(pending) // first pass: still PENDING
+      .mockResolvedValueOnce(buildBillRow({ status: BillPaymentStatus.FAILED, refundTransactionId: 'et-winner' }));
     mocked.__tx.employeeTransaction.update.mockResolvedValue({});
     // The insert loses the race → unique violation on bill:refund:<key>.
     mocked.__tx.employeeTransaction.create.mockRejectedValue(
@@ -506,15 +536,16 @@ describe('refundFailedBill — idempotency', () => {
         clientVersion: 'test',
       }),
     );
-    mocked.billPayment.update.mockResolvedValue(
-      buildBillRow({ status: BillPaymentStatus.FAILED, refundTransactionId: 'et-winner' }),
-    );
 
     const out = await refundFailedBill(pending, 'p2002-race');
 
-    // No throw; healed to FAILED pointing at the winner's refund.
+    // No throw; decided again under the lock, which sees the winner's
+    // refund — and nothing is written outside the lock.
     expect(out.status).toBe(BillPaymentStatus.FAILED);
     expect(out.refundTransactionId).toBe('et-winner');
+    expect(mocked.$transaction).toHaveBeenCalledTimes(2);
+    expect(mocked.__tx.employee.update).not.toHaveBeenCalled();
+    expect(mocked.billPayment.update).not.toHaveBeenCalled();
   });
 });
 
@@ -601,5 +632,187 @@ describe('settleBillPayment', () => {
         }),
       }),
     );
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// TASK-010 — a settled bill is never refunded
+// ═══════════════════════════════════════════════════════════════════
+
+describe('TASK-010 — no refund after settlement', () => {
+  const completed = () =>
+    buildBillRow({ status: BillPaymentStatus.COMPLETED, externalRef: 'rail-settled', processedAt: new Date() });
+
+  function expectNoRefundWrites() {
+    expect(mocked.__tx.employeeTransaction.update).not.toHaveBeenCalled(); // wallet txn untouched
+    expect(mocked.__tx.employeeTransaction.create).not.toHaveBeenCalled(); // no REFUND row
+    expect(mocked.__tx.employee.update).not.toHaveBeenCalled(); // no wallet credit
+    expect(mocked.__tx.billPayment.update).not.toHaveBeenCalled(); // stays COMPLETED
+    expect(mocked.billPayment.update).not.toHaveBeenCalled();
+  }
+
+  it.each([
+    ['a stale PENDING snapshot (adapter path racing the webhook)', BillPaymentStatus.PENDING],
+    ['the COMPLETED row itself (late webhook failure)', BillPaymentStatus.COMPLETED],
+  ])('refuses to refund when the fresh row is COMPLETED, given %s', async (_label, snapshotStatus) => {
+    mocked.__tx.billPayment.findUnique.mockResolvedValue(completed());
+    mocked.__tx.auditLog.create.mockResolvedValue({});
+
+    const out = await refundFailedBill(buildBillRow({ status: snapshotStatus }), 'late_failure', 'rail-late');
+
+    expect(out.status).toBe(BillPaymentStatus.COMPLETED);
+    expectNoRefundWrites();
+    expect(mocked.__tx.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'BILL_PAYMENT_FAILURE_AFTER_SETTLEMENT_CONFLICT',
+        resourceId: 'bp-1',
+        metadata: {
+          currentStatus: BillPaymentStatus.COMPLETED,
+          settledExternalRef: 'rail-settled',
+          eventExternalRef: 'rail-late',
+          failureCode: 'late_failure',
+          detectedUnderLock: true,
+        },
+      }),
+    });
+  });
+
+  it('a late reversal of a settled bill is also refused (no verified reversal workflow exists)', async () => {
+    mocked.__tx.billPayment.findUnique.mockResolvedValue(completed());
+    mocked.__tx.auditLog.create.mockResolvedValue({});
+
+    const out = await refundFailedBill(completed(), 'rail_reported_reversed', 'rail-settled');
+
+    expect(out.status).toBe(BillPaymentStatus.COMPLETED);
+    expectNoRefundWrites();
+  });
+
+  it('conflict evidence never carries free-text reasons', async () => {
+    mocked.__tx.billPayment.findUnique.mockResolvedValue(completed());
+    mocked.__tx.auditLog.create.mockResolvedValue({});
+
+    await refundFailedBill(completed(), 'connect ECONNREFUSED 10.0.0.5:443 account=DEWA-123 user alice');
+
+    const metadata = mocked.__tx.auditLog.create.mock.calls[0][0].data.metadata;
+    expect(metadata.failureCode).toBe('unspecified');
+    expect(JSON.stringify(metadata)).not.toContain('alice');
+  });
+
+  it('takes the lock before reading the fresh row', async () => {
+    mocked.__tx.billPayment.findUnique.mockResolvedValue(completed());
+    mocked.__tx.auditLog.create.mockResolvedValue({});
+
+    await refundFailedBill(buildBillRow(), 'late_failure');
+
+    expect((acquireWorkerLockScoped as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      mocked.__tx.billPayment.findUnique.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('refunds a genuinely failed, unsettled bill from the FRESH row', async () => {
+    // A stale snapshot must not decide the amount or the wallet txn.
+    const snapshot = buildBillRow({ totalAmount: 999, walletTransactionId: 'et-stale' });
+    mocked.__tx.billPayment.findUnique.mockResolvedValue(buildBillRow({ totalAmount: 200, walletTransactionId: 'et-1' }));
+    mocked.__tx.employeeTransaction.update.mockResolvedValue({});
+    mocked.__tx.employeeTransaction.create.mockResolvedValue({ id: 'et-refund' });
+    mocked.__tx.employee.update.mockResolvedValue({});
+    mocked.__tx.billPayment.update.mockResolvedValue(buildBillRow({ status: BillPaymentStatus.FAILED }));
+    mocked.__tx.auditLog.create.mockResolvedValue({});
+
+    const out = await refundFailedBill(snapshot, 'rail_failed');
+
+    expect(out.status).toBe(BillPaymentStatus.FAILED);
+    expect(mocked.__tx.employeeTransaction.update).toHaveBeenCalledWith({
+      where: { id: 'et-1' },
+      data: expect.objectContaining({ status: TransactionStatus.FAILED }),
+    });
+    expect(mocked.__tx.employeeTransaction.create.mock.calls[0][0].data).toMatchObject({
+      type: TransactionType.REFUND,
+      amount: 200,
+      idempotencyKey: 'bill:refund:idem-1',
+    });
+    expect(mocked.__tx.employee.update).toHaveBeenCalledWith({
+      where: { id: 'emp-1' },
+      data: { walletBalance: { increment: 200 } },
+    });
+  });
+
+  it('a duplicate failure on a FAILED bill writes nothing', async () => {
+    mocked.__tx.billPayment.findUnique.mockResolvedValue(
+      buildBillRow({ status: BillPaymentStatus.FAILED, refundTransactionId: 'et-refund' }),
+    );
+
+    const out = await refundFailedBill(buildBillRow(), 'duplicate_failure_event');
+
+    expect(out.status).toBe(BillPaymentStatus.FAILED);
+    expect(mocked.__tx.billPayment.update).not.toHaveBeenCalled();
+    expect(mocked.__tx.auditLog.create).not.toHaveBeenCalled();
+    expect(mocked.__tx.employeeTransaction.create).not.toHaveBeenCalled();
+    expect(mocked.__tx.employee.update).not.toHaveBeenCalled();
+  });
+
+  it('settle refuses a PENDING bill that already has a refund row (would be completed-and-refunded)', async () => {
+    mocked.__tx.billPayment.findUnique.mockResolvedValue(buildBillRow());
+    mocked.__tx.employeeTransaction.findUnique.mockResolvedValue({ id: 'et-refund' });
+    mocked.__tx.auditLog.create.mockResolvedValue({});
+
+    const out = await settleBillPayment(buildBillRow(), 'rail-late-success');
+
+    expect(out.status).toBe(BillPaymentStatus.PENDING);
+    expect(mocked.__tx.employeeTransaction.findUnique).toHaveBeenCalledWith({
+      where: { idempotencyKey: 'bill:refund:idem-1' },
+    });
+    expect(mocked.__tx.billPayment.update).not.toHaveBeenCalled();
+    expect(mocked.__tx.employeeTransaction.update).not.toHaveBeenCalled();
+    expect(mocked.__tx.auditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: 'BILL_PAYMENT_SUCCESS_AFTER_FAILURE_CONFLICT',
+          metadata: expect.objectContaining({ detectedUnderLock: true, refundIssued: true }),
+        }),
+      }),
+    );
+  });
+
+  it('settle records who confirmed it', async () => {
+    mocked.__tx.billPayment.findUnique.mockResolvedValue(buildBillRow());
+    mocked.__tx.employeeTransaction.update.mockResolvedValue({});
+    mocked.__tx.billPayment.update.mockResolvedValue(buildBillRow({ status: BillPaymentStatus.COMPLETED }));
+    mocked.__tx.auditLog.create.mockResolvedValue({});
+
+    await settleBillPayment(buildBillRow(), 'rail-ok', 'bill-payment:adapter');
+
+    expect(mocked.__tx.auditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ action: 'BILL_PAYMENT_COMPLETED', actorId: 'bill-payment:adapter' }) }),
+    );
+  });
+
+  it('adapter timeout after the rail already settled the bill: payBill returns the settled bill, no refund', async () => {
+    setBillerAdapter({ submit: jest.fn().mockRejectedValue(new Error('adapter timeout')) });
+    mocked.__tx.employee.findUnique.mockResolvedValue({ id: 'emp-1', walletBalance: 1_000 });
+    mocked.__tx.billPayment.create.mockResolvedValue(buildBillRow({ walletTransactionId: null }));
+    mocked.__tx.employeeTransaction.create.mockResolvedValueOnce({ id: 'et-1' });
+    mocked.__tx.employee.update.mockResolvedValue({});
+    mocked.__tx.billPayment.update.mockResolvedValueOnce(buildBillRow());
+    mocked.__tx.auditLog.create.mockResolvedValue({});
+    // The success webhook committed while the adapter call was timing out.
+    mocked.__tx.billPayment.findUnique.mockResolvedValue(completed());
+
+    const out = await payBill({
+      employeeId: 'emp-1',
+      billerType: BillerType.DEWA,
+      billerAccountRef: 'DEWA-123',
+      amount: 200,
+      idempotencyKey: 'idem-1',
+    });
+
+    expect(out.status).toBe(BillPaymentStatus.COMPLETED);
+    // Only the initial debit wrote a wallet txn / balance change.
+    expect(mocked.__tx.employeeTransaction.create).toHaveBeenCalledTimes(1);
+    expect(mocked.__tx.employee.update).toHaveBeenCalledTimes(1);
+    expect(mocked.__tx.employee.update).toHaveBeenCalledWith({
+      where: { id: 'emp-1' },
+      data: { walletBalance: { increment: -200 } },
+    });
   });
 });
