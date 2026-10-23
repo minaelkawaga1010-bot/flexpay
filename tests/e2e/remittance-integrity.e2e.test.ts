@@ -35,6 +35,9 @@ import { moneyHashService } from '@modules/remittance/moneyhash.service';
 const START = 1000;
 const AMOUNT = 200;
 const employees: string[] = [];
+// Audit rows keyed by a provider transferId (not an employee id) — e.g. the
+// unmatched-webhook row — tracked so teardown removes them too.
+const auditResourceIds: string[] = [];
 const uid = () => randomBytes(5).toString('hex');
 const phone = () => `+97153${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -153,7 +156,7 @@ describe('MoneyHash remittance settlement / refund integrity — PostgreSQL + Re
     await dropTriggers();
     await prisma.auditLog.deleteMany({ where: { actorId: { in: employees } } });
     const rows = await prisma.employeeTransaction.findMany({ where: { employeeId: { in: employees } }, select: { id: true } });
-    await prisma.auditLog.deleteMany({ where: { resourceId: { in: rows.map((r) => r.id) } } });
+    await prisma.auditLog.deleteMany({ where: { resourceId: { in: [...rows.map((r) => r.id), ...auditResourceIds] } } });
     await prisma.employeeTransaction.deleteMany({ where: { employeeId: { in: employees } } });
     await prisma.employee.deleteMany({ where: { id: { in: employees } } });
     await closeAllQueues();
@@ -269,55 +272,115 @@ describe('MoneyHash remittance settlement / refund integrity — PostgreSQL + Re
   });
 
   // ─────────────────────────────────────────────────────────────────
-  // Submission outcomes: rejection, ambiguity, timeout-after-success
+  // Submission outcomes (TASK-012): every network / HTTP error is
+  // AMBIGUOUS — the remittance is held PENDING, never refunded or failed.
   // ─────────────────────────────────────────────────────────────────
 
-  it('a definitive provider rejection at submission refunds in full and never leaves a debit', async () => {
+  it.each([
+    ['HTTP 422', { response: { status: 422 } }],
+    ['HTTP 400', { response: { status: 400 } }],
+    ['HTTP 500', { response: { status: 500 } }],
+    ['connection reset (ECONNRESET)', Object.assign(new Error('reset'), { code: 'ECONNRESET' })],
+    ['connection refused (ECONNREFUSED)', Object.assign(new Error('refused'), { code: 'ECONNREFUSED' })],
+    ['DNS not found (ENOTFOUND)', Object.assign(new Error('dns'), { code: 'ENOTFOUND' })],
+    ['DNS retry (EAI_AGAIN)', Object.assign(new Error('dns'), { code: 'EAI_AGAIN' })],
+    ['timeout (ECONNABORTED)', Object.assign(new Error('timeout'), { code: 'ECONNABORTED' })],
+  ] as const)('%s at submission is held PENDING, never refunded or failed', async (_label, err) => {
     const employeeId = await newEmployee();
-    const spy = jest.spyOn(moneyHashService, 'createTransfer').mockRejectedValueOnce({ response: { status: 422 } });
-    try {
-      await expect(remittanceService.send(employeeId, 300, 'EGP', { name: 'B', bankAccount: '00012345', swiftCode: 'ABCDAEAA' })).rejects.toMatchObject({
-        status: 502,
-        code: 'REMITTANCE_REJECTED',
-      });
-    } finally {
-      spy.mockRestore();
-    }
-    const rows = await prisma.employeeTransaction.findMany({ where: { employeeId }, orderBy: { createdAt: 'asc' } });
-    const remittance = rows.find((r) => r.type === 'REMITTANCE')!;
-    const refunds = rows.filter((r) => r.type === 'REFUND');
-    expect(remittance.status).toBe('FAILED');
-    expect(refunds).toHaveLength(1);
-    expect((await prisma.employee.findUniqueOrThrow({ where: { id: employeeId } })).walletBalance).toBe(START);
-  });
-
-  it('an ambiguous submission is held PENDING and audited — a timeout is never taken as failure', async () => {
-    const employeeId = await newEmployee();
-    const spy = jest.spyOn(moneyHashService, 'createTransfer').mockRejectedValueOnce(Object.assign(new Error('timeout'), { code: 'ECONNABORTED' }));
+    const spy = jest.spyOn(moneyHashService, 'createTransfer').mockRejectedValueOnce(err);
     let result: Awaited<ReturnType<typeof remittanceService.send>>;
     try {
       result = await remittanceService.send(employeeId, 300, 'EGP', { name: 'B', bankAccount: '00012345', swiftCode: 'ABCDAEAA' });
     } finally {
       spy.mockRestore();
     }
+    // Not a 502 rejection — a non-terminal PENDING_VERIFICATION outcome.
     expect(result.status).toBe('PENDING_VERIFICATION');
 
     const rows = await prisma.employeeTransaction.findMany({ where: { employeeId } });
     const remittance = rows.find((r) => r.type === 'REMITTANCE')!;
-    expect(remittance.status).toBe('PENDING'); // NOT failed
+    expect(remittance.status).toBe('PENDING'); // NOT FAILED
     expect(rows.some((r) => r.type === 'REFUND')).toBe(false); // NOT refunded
     expect((await prisma.employee.findUniqueOrThrow({ where: { id: employeeId } })).walletBalance).toBe(START - 301.8);
-    const audits = await prisma.auditLog.findMany({ where: { resourceId: remittance.id } });
-    expect(audits.map((a) => a.action)).toContain('REMITTANCE_SUBMISSION_OUTCOME_UNKNOWN');
+    // The reserved funds are tracked, not silently held (TASK-012 §6).
+    const audit = (await prisma.auditLog.findMany({ where: { resourceId: remittance.id } }))
+      .find((a) => a.action === 'REMITTANCE_SUBMISSION_OUTCOME_UNKNOWN')!;
+    expect(audit).toBeDefined();
+    expect((audit.metadata as Record<string, unknown>).classification).toBe('AMBIGUOUS');
+    expect((audit.metadata as Record<string, unknown>).requiresReconciliation).toBe(true);
+  });
 
-    // Reconciliation later verifies the transfer DID settle (a timeout
-    // that hid a success). Modelled by a direct confirm — MoneyHash's
-    // webhook matching for an unbound client reference is NOT VERIFIED.
+  it('a timeout that hid a real settlement reconciles to COMPLETED — no refund, no double-debit', async () => {
+    const employeeId = await newEmployee();
+    const spy = jest.spyOn(moneyHashService, 'createTransfer').mockRejectedValueOnce(Object.assign(new Error('timeout'), { code: 'ECONNABORTED' }));
+    try {
+      await remittanceService.send(employeeId, 300, 'EGP', { name: 'B', bankAccount: '00012345', swiftCode: 'ABCDAEAA' });
+    } finally {
+      spy.mockRestore();
+    }
+    const remittance = (await prisma.employeeTransaction.findMany({ where: { employeeId } })).find((r) => r.type === 'REMITTANCE')!;
+    expect(remittance.status).toBe('PENDING');
+
+    // Reconciliation later verifies the transfer DID settle. Modelled by a
+    // direct confirm — MoneyHash's webhook matching for an unbound client
+    // reference is NOT VERIFIED (see the unmatched-webhook test below).
     await confirmRemittance(remittance.id, employeeId, { transferId: remittance.reference!, event: 'succeeded' }, 'reconciliation');
     const after = await prisma.employeeTransaction.findUniqueOrThrow({ where: { id: remittance.id } });
     expect(after.status).toBe('COMPLETED');
     expect((await prisma.employee.findUniqueOrThrow({ where: { id: employeeId } })).walletBalance).toBe(START - 301.8);
     expect(await prisma.employeeTransaction.count({ where: { employeeId, type: 'REFUND' } })).toBe(0);
+  });
+
+  it('a repeated send with the same client key submits no second external transfer (409)', async () => {
+    const employeeId = await newEmployee();
+    const calls: string[] = [];
+    const spy = jest.spyOn(moneyHashService, 'createTransfer').mockImplementation(async () => {
+      const id = `mh-${uid()}`;
+      calls.push(id);
+      return id;
+    });
+    try {
+      const first = await remittanceService.send(employeeId, 300, 'EGP', { name: 'B', bankAccount: '00012345', swiftCode: 'ABCDAEAA' }, { idempotencyKey: 'quote:same' });
+      expect(first.status).toBe('PENDING');
+      await expect(
+        remittanceService.send(employeeId, 300, 'EGP', { name: 'B', bankAccount: '00012345', swiftCode: 'ABCDAEAA' }, { idempotencyKey: 'quote:same' }),
+      ).rejects.toMatchObject({ status: 409, code: 'REMITTANCE_ALREADY_SUBMITTED' });
+    } finally {
+      spy.mockRestore();
+    }
+    // One remittance row, one external transfer, one debit.
+    expect(await prisma.employeeTransaction.count({ where: { employeeId, type: 'REMITTANCE' } })).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect((await prisma.employee.findUniqueOrThrow({ where: { id: employeeId } })).walletBalance).toBe(START - 301.8);
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Webhook arriving before transferId is persisted (TASK-012 §7)
+  // ─────────────────────────────────────────────────────────────────
+
+  it('a signed webhook for an unpersisted transferId is retained + audited, with no state change', async () => {
+    const employeeId = await newEmployee();
+    // A remittance whose binding has not happened (reference is still the
+    // FlexPay rem_ handle), so the provider transferId matches no row yet.
+    const unboundTransferId = `tr-unbound-${uid()}`;
+    const row = await prisma.employeeTransaction.create({
+      data: { employeeId, type: 'REMITTANCE', amount: AMOUNT, fee: 0, totalAmount: AMOUNT, currency: 'EGP', status: 'PENDING', reference: `rem_${uid()}`, merchantName: 'MoneyHash' },
+    });
+    await prisma.employee.update({ where: { id: employeeId }, data: { walletBalance: { decrement: AMOUNT } } });
+    const before = (await prisma.employee.findUniqueOrThrow({ where: { id: employeeId } })).walletBalance;
+
+    const res = await webhook({ transferId: unboundTransferId, status: 'succeeded' });
+    expect(res.status).toBe(202);
+
+    // No effect on the unmatched remittance; the event is retained durably.
+    const after = await prisma.employeeTransaction.findUniqueOrThrow({ where: { id: row.id } });
+    expect(after.status).toBe('PENDING');
+    expect((await prisma.employee.findUniqueOrThrow({ where: { id: employeeId } })).walletBalance).toBe(before);
+    const unmatched = await prisma.auditLog.findFirst({ where: { action: 'REMITTANCE_WEBHOOK_UNMATCHED', resourceId: unboundTransferId } });
+    expect(unmatched).not.toBeNull();
+    expect((unmatched!.metadata as Record<string, unknown>).requiresReconciliation).toBe(true);
+    // Track the synthetic resourceId for teardown.
+    auditResourceIds.push(unboundTransferId);
   });
 
   // ─────────────────────────────────────────────────────────────────

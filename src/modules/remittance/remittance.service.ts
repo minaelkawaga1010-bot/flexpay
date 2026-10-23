@@ -16,16 +16,56 @@ const fxCache = new Map<string, { rate: number; expiresAt: number }>();
 type Quote = { rate: number; fee: number; recipientAmount: number; totalDebit: number };
 
 /**
- * MoneyHash refused the request, or it never reached MoneyHash: no
- * transfer was created, so refunding is safe. Anything else — timeout,
- * connection reset, 5xx, an unrecognised error — is ambiguous: the
- * transfer may exist upstream. (HTTP-level reading of the response; the
- * MoneyHash error contract itself is not verified.)
+ * How a failed submission ATTEMPT is classified (TASK-012).
+ *
+ *   VERIFIED_REJECTION — an authoritative, DOCUMENTED MoneyHash outcome
+ *                        guarantees the transfer was not executed, so the
+ *                        reserved funds can be refunded immediately.
+ *   AMBIGUOUS          — anything else. The transfer may have executed
+ *                        upstream; it is NEVER refunded or marked FAILED on
+ *                        this evidence alone.
+ *
+ * The only authoritative FAILURE signal FlexPay trusts is the signed
+ * `transfer.failed` / `transfer.reversed` webhook (TASK-011), not a
+ * submission-time error.
  */
+export type SubmissionOutcome = 'VERIFIED_REJECTION' | 'AMBIGUOUS';
+
+/**
+ * Submission errors that an EXPLICITLY DOCUMENTED MoneyHash classification
+ * guarantees mean the transfer was NOT executed.
+ *
+ * Intentionally EMPTY: FlexPay has no verified MoneyHash documentation
+ * establishing that any HTTP status (400/401/403/404/422 included) or
+ * transport error (timeout, ECONNRESET, ECONNREFUSED, ENOTFOUND,
+ * EAI_AGAIN, …) proves the transfer did not run. A refused request can
+ * still have been accepted and executed before the error surfaced. Add an
+ * entry ONLY against an authoritative, documented MoneyHash classification
+ * — never from an HTTP-status or errno guess. Until then every submission
+ * failure is AMBIGUOUS and the remittance stays PENDING for reconciliation.
+ */
+const DOCUMENTED_NON_EXECUTION: { httpStatuses: readonly number[]; transportCodes: readonly string[] } = {
+  httpStatuses: [],
+  transportCodes: [],
+};
+
+export function classifySubmissionOutcome(err: unknown): SubmissionOutcome {
+  const e = (err ?? {}) as { response?: { status?: number }; code?: string };
+  const status = e.response?.status;
+  if (status !== undefined && DOCUMENTED_NON_EXECUTION.httpStatuses.includes(status)) {
+    return 'VERIFIED_REJECTION';
+  }
+  if (e.code && DOCUMENTED_NON_EXECUTION.transportCodes.includes(e.code)) {
+    return 'VERIFIED_REJECTION';
+  }
+  // Timeouts, connection resets, DNS failures, connection refusals, 4xx and
+  // 5xx without a documented classification, and anything unrecognised.
+  return 'AMBIGUOUS';
+}
+
+/** @deprecated TASK-012: submission errors are never assumed definitive; use classifySubmissionOutcome. */
 export function submissionDefinitelyRejected(err: unknown): boolean {
-  const e = err as { response?: { status?: number }; code?: string };
-  if (e.response?.status !== undefined) return [400, 401, 403, 404, 422].includes(e.response.status);
-  return ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'].includes(e.code ?? '');
+  return classifySubmissionOutcome(err) === 'VERIFIED_REJECTION';
 }
 
 function isUniqueViolation(err: unknown): boolean {
@@ -105,13 +145,18 @@ export const remittanceService = {
   },
 
   /**
-   * Reserve, submit, then bind (TASK-011). The remittance stays PENDING
+   * Reserve, submit, then bind (TASK-011/012). The remittance stays PENDING
    * until MoneyHash's signed webhook confirms or fails it. A submission
-   * MoneyHash refused is refunded at once; one whose outcome is unknown
-   * keeps the debit and stays PENDING for reconciliation — a timeout is
-   * never taken as proof that the transfer failed.
+   * failure is refunded immediately ONLY when an authoritative, documented
+   * MoneyHash classification proves the transfer did not execute
+   * (classifySubmissionOutcome → VERIFIED_REJECTION; none documented today).
+   * Every other outcome — timeout, reset, DNS failure, refusal, 4xx, 5xx —
+   * is AMBIGUOUS: the debit and the PENDING row are kept and an escalation
+   * record written, because a network or HTTP error never proves the
+   * transfer failed.
    *
-   * `idempotencyKey` (client-supplied): at most one remittance per key.
+   * `idempotencyKey` (client-supplied): at most one remittance per key, so
+   * a retry can never submit a second external transfer.
    */
   async send(
     employeeId: string,
@@ -134,7 +179,16 @@ export const remittanceService = {
     try {
       transferId = await moneyHashService.createTransfer({ amount, currency: 'AED', beneficiary, reference });
     } catch (err) {
-      if (submissionDefinitelyRejected(err)) {
+      // Error class only — never the payload, beneficiary, or amount.
+      const errorClass = String(
+        (err as { code?: string }).code ??
+          (err as { response?: { status?: number } }).response?.status ??
+          'unknown',
+      );
+      if (classifySubmissionOutcome(err) === 'VERIFIED_REJECTION') {
+        // Dormant today (DOCUMENTED_NON_EXECUTION is empty): reached only
+        // when an authoritative, documented MoneyHash classification proves
+        // the transfer did not execute — then an immediate refund is safe.
         await failRemittance(
           remittance.id,
           employeeId,
@@ -147,13 +201,12 @@ export const remittanceService = {
           'MoneyHash rejected the transfer; the full amount was returned to the wallet',
         );
       }
-      // Outcome unknown: keep the debit and the PENDING row. Error class only.
-      const errorClass = String(
-        (err as { code?: string; response?: { status?: number } }).code ??
-          (err as { response?: { status?: number } }).response?.status ??
-          'unknown',
-      );
-      logger.warn('moneyhash remittance: submission outcome unknown — held PENDING', {
+      // AMBIGUOUS: the transfer may have executed upstream. Keep the debit
+      // and the PENDING row — never refund or fail on a timeout / reset /
+      // DNS failure / refusal / 4xx / 5xx. Retain an escalation record so
+      // the reserved funds are tracked for operator reconciliation, not
+      // silently held.
+      logger.warn('moneyhash remittance: submission outcome AMBIGUOUS — held PENDING for reconciliation', {
         remittanceId: remittance.id,
         errorClass,
       });
@@ -164,7 +217,12 @@ export const remittanceService = {
           action: 'REMITTANCE_SUBMISSION_OUTCOME_UNKNOWN',
           resourceType: 'EmployeeTransaction',
           resourceId: remittance.id,
-          metadata: { reference, errorClass } as Prisma.InputJsonValue,
+          metadata: {
+            reference,
+            errorClass,
+            classification: 'AMBIGUOUS',
+            requiresReconciliation: true,
+          } as Prisma.InputJsonValue,
         },
       });
       return {

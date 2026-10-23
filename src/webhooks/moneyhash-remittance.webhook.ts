@@ -1,5 +1,5 @@
 import { Request, Response, Router } from 'express';
-import { TransactionType } from '@prisma/client';
+import { Prisma, TransactionType } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@config/prisma';
 import logger from '@shared/utils/logger';
@@ -167,10 +167,40 @@ export class MoneyHashRemittanceWebhook {
     });
 
     if (!original) {
-      // Unknown transferId. ACK so MoneyHash stops retrying; surface
-      // for ops investigation. Don't 4xx — that triggers MH retry
-      // storms.
-      logger.warn('moneyhash webhook: unknown transferId', { transferId: event.transferId });
+      // Authenticated (signed) but no remittance row carries this
+      // transferId (TASK-012 §7). Two known causes:
+      //   (a) the binding `update` in remittanceService.send has not yet
+      //       committed — this signed event raced ahead of transferId
+      //       persistence; or
+      //   (b) MoneyHash does not echo our client reference and the row was
+      //       never bound (an ambiguous submission still held PENDING).
+      // The event is genuine, so RETAIN it durably for operator
+      // reconciliation instead of dropping it to a log line, and ACK with
+      // 202 (a 4xx/5xx would trigger a MoneyHash retry storm).
+      //
+      // NOT IMPLEMENTED (needs a persistent store + separate approval,
+      // TASK-012 §9): automatic correlation of a retained event to a
+      // remittance once its binding commits, and automatic retry. Today
+      // reconciliation is manual, driven by these audit rows.
+      logger.warn('moneyhash webhook: unmatched transferId — retained for reconciliation', {
+        transferId: event.transferId,
+        status: event.status,
+      });
+      await prisma.auditLog.create({
+        data: {
+          actorType: 'system',
+          actorId: 'webhook:moneyhash',
+          action: 'REMITTANCE_WEBHOOK_UNMATCHED',
+          resourceType: 'RemittanceTransfer',
+          resourceId: event.transferId,
+          metadata: {
+            transferId: event.transferId,
+            event: event.status,
+            providerReference: event.providerReference ?? null,
+            requiresReconciliation: true,
+          } as Prisma.InputJsonValue,
+        },
+      });
       res.status(202).json({ received: true });
       return;
     }

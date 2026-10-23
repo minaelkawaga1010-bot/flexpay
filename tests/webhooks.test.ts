@@ -654,14 +654,26 @@ describe('MoneyHashRemittanceWebhook /status', () => {
     });
   });
 
-  it('unknown transferId returns 202 (no retry storm) without DB writes', async () => {
+  it('unmatched transferId: 202, no financial tx, but durably retained + audited (TASK-012)', async () => {
     mocked.employeeTransaction.findFirst.mockResolvedValue(null);
-    const req = signedReq({ transferId: 'tr-unknown', status: 'succeeded' });
+    mocked.auditLog.create.mockResolvedValue({});
+    const req = signedReq({ transferId: 'tr-unknown', status: 'succeeded', providerReference: 'mh-p1' });
     const res = buildRes();
     await invokeRoute(moneyHashRemittanceWebhook.router, '/status', req, res);
 
     expect(res.statusCode).toBe(202);
+    // No financial transaction opens for an unmatched event…
     expect(mocked.$transaction).not.toHaveBeenCalled();
+    // …but the signed event is retained durably for reconciliation.
+    expect(mocked.auditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: 'REMITTANCE_WEBHOOK_UNMATCHED',
+          resourceId: 'tr-unknown',
+          metadata: expect.objectContaining({ event: 'succeeded', requiresReconciliation: true }),
+        }),
+      }),
+    );
   });
 
   it('accepts the new-style { type, data } payload variant', async () => {

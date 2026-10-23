@@ -64,7 +64,16 @@ import {
   refundIdempotencyKey,
 } from '../src/modules/remittance/remittance-lifecycle';
 import { moneyHashService } from '../src/modules/remittance/moneyhash.service';
-import { remittanceService, submissionDefinitelyRejected } from '../src/modules/remittance/remittance.service';
+import {
+  remittanceService,
+  classifySubmissionOutcome,
+  submissionDefinitelyRejected,
+} from '../src/modules/remittance/remittance.service';
+// NOTE: send() calls classifySubmissionOutcome via its module-local binding,
+// so the VERIFIED_REJECTION branch cannot be driven from a jest spy on the
+// export. The empty DOCUMENTED_NON_EXECUTION table keeps it dormant by
+// design; the authoritative-evidence refund path is the signed webhook
+// (failRemittance), covered above. The classifier itself is unit-tested below.
 
 const mocked = prisma as unknown as {
   employeeTransaction: { update: jest.Mock };
@@ -127,7 +136,7 @@ beforeEach(() => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
-// refundIdempotencyKey + submissionDefinitelyRejected (pure)
+// refundIdempotencyKey (pure)
 // ═══════════════════════════════════════════════════════════════════
 
 describe('refundIdempotencyKey', () => {
@@ -136,26 +145,41 @@ describe('refundIdempotencyKey', () => {
   });
 });
 
-describe('submissionDefinitelyRejected', () => {
-  it.each([400, 401, 403, 404, 422])('treats HTTP %d as a definitive rejection', (status) => {
-    expect(submissionDefinitelyRejected({ response: { status } })).toBe(true);
+// ═══════════════════════════════════════════════════════════════════
+// classifySubmissionOutcome (TASK-012) — nothing is definitive without
+// an explicitly documented MoneyHash classification (table is empty)
+// ═══════════════════════════════════════════════════════════════════
+
+describe('classifySubmissionOutcome', () => {
+  // TASK-012 §4: a 4xx never proves the transfer did not execute.
+  it.each([400, 401, 403, 404, 422])('HTTP %d is AMBIGUOUS, not a rejection', (status) => {
+    expect(classifySubmissionOutcome({ response: { status } })).toBe('AMBIGUOUS');
   });
 
-  it.each([408, 429, 500, 502, 503, 504])('treats HTTP %d as ambiguous (transfer may exist)', (status) => {
-    expect(submissionDefinitelyRejected({ response: { status } })).toBe(false);
+  // TASK-012 §3: generic 5xx is ambiguous.
+  it.each([408, 429, 500, 502, 503, 504])('HTTP %d is AMBIGUOUS', (status) => {
+    expect(classifySubmissionOutcome({ response: { status } })).toBe('AMBIGUOUS');
   });
 
-  it('treats connection-refused / DNS failures (request never landed) as definitive', () => {
-    for (const code of ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']) {
-      expect(submissionDefinitelyRejected({ code })).toBe(true);
+  // TASK-012 §3: connection refusals and DNS failures are NOW ambiguous
+  // (they were treated as definitive before TASK-012).
+  it.each(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT'])(
+    'transport error %s is AMBIGUOUS',
+    (code) => {
+      expect(classifySubmissionOutcome({ code })).toBe('AMBIGUOUS');
+    },
+  );
+
+  it('an unrecognised error is AMBIGUOUS', () => {
+    expect(classifySubmissionOutcome(new Error('socket hang up'))).toBe('AMBIGUOUS');
+    expect(classifySubmissionOutcome(undefined)).toBe('AMBIGUOUS');
+    expect(classifySubmissionOutcome({})).toBe('AMBIGUOUS');
+  });
+
+  it('submissionDefinitelyRejected (deprecated) returns false for every non-documented outcome', () => {
+    for (const err of [{ response: { status: 422 } }, { code: 'ECONNREFUSED' }, new Error('x')]) {
+      expect(submissionDefinitelyRejected(err)).toBe(false);
     }
-  });
-
-  it('treats a timeout or reset after the bytes left as ambiguous', () => {
-    for (const code of [' ETIMEDOUT', 'ECONNRESET', 'ECONNABORTED']) {
-      expect(submissionDefinitelyRejected({ code: code.trim() })).toBe(false);
-    }
-    expect(submissionDefinitelyRejected(new Error('socket hang up'))).toBe(false);
   });
 });
 
@@ -390,34 +414,31 @@ describe('remittanceService.send', () => {
     expect(createTransfer).not.toHaveBeenCalled();
   });
 
-  it('definitive provider rejection (HTTP 422): remittance failed and refunded, caller gets 502', async () => {
-    createTransfer.mockRejectedValue({ response: { status: 422 } });
-    // After reserve creates the PENDING row, the failure path re-reads it.
-    givenRow(remittanceRow({ status: TransactionStatus.PENDING }));
-
-    await expect(remittanceService.send('emp-1', 500, 'EGP', BENEFICIARY)).rejects.toMatchObject({
-      status: 502,
-      code: 'REMITTANCE_REJECTED',
-    });
-    // Refund issued (full credit-back) — the fail path ran
-    expect(mocked.__tx.employee.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { walletBalance: { increment: expect.any(Number) } } }),
-    );
-    expect(mocked.__tx.employeeTransaction.create.mock.calls.some((c) => c[0].data.type === TransactionType.REFUND)).toBe(true);
-  });
-
-  it('ambiguous submission (HTTP 503): wallet stays debited, row held PENDING, outcome audited', async () => {
-    createTransfer.mockRejectedValue({ response: { status: 503 } });
+  // TASK-012: no submission error is definitive today, so EVERY failed
+  // submission is held PENDING — never refunded or marked FAILED.
+  it.each([
+    ['HTTP 422', { response: { status: 422 } }, '422'],
+    ['HTTP 400', { response: { status: 400 } }, '400'],
+    ['HTTP 500', { response: { status: 500 } }, '500'],
+    ['HTTP 503', { response: { status: 503 } }, '503'],
+    ['ECONNREFUSED', Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }), 'ECONNREFUSED'],
+    ['ENOTFOUND', Object.assign(new Error('dns'), { code: 'ENOTFOUND' }), 'ENOTFOUND'],
+    ['EAI_AGAIN', Object.assign(new Error('dns'), { code: 'EAI_AGAIN' }), 'EAI_AGAIN'],
+    ['ECONNRESET', Object.assign(new Error('reset'), { code: 'ECONNRESET' }), 'ECONNRESET'],
+    ['timeout', Object.assign(new Error('timeout'), { code: 'ECONNABORTED' }), 'ECONNABORTED'],
+  ] as const)('ambiguous submission (%s): held PENDING, no refund, escalation audited', async (_label, err, errorClass) => {
+    createTransfer.mockRejectedValue(err);
 
     const result = await remittanceService.send('emp-1', 500, 'EGP', BENEFICIARY);
 
     expect(result).toMatchObject({ status: 'PENDING_VERIFICATION' });
-    // No failure transition, no refund, no second wallet write beyond the reserve debit
+    // No failure transition, no refund, no wallet write beyond the reserve debit
     expect(mocked.__tx.employee.update).not.toHaveBeenCalled();
     expect(mocked.employeeTransaction.update).not.toHaveBeenCalled();
+    expect(mocked.__tx.employeeTransaction.create.mock.calls.some((c) => c[0].data.type === TransactionType.REFUND)).toBe(false);
     const audit = mocked.auditLog.create.mock.calls[0][0].data;
     expect(audit.action).toBe('REMITTANCE_SUBMISSION_OUTCOME_UNKNOWN');
-    expect(audit.metadata).toMatchObject({ errorClass: '503' });
+    expect(audit.metadata).toMatchObject({ errorClass, classification: 'AMBIGUOUS', requiresReconciliation: true });
   });
 
   it('ambiguous submission audit carries only an error class — no payload, beneficiary, or amount', async () => {
