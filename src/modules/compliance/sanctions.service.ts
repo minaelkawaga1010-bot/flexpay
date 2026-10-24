@@ -163,72 +163,151 @@ export interface ScreeningInput {
   nationality?: string | null;
 }
 
+/**
+ * Explicit screening outcome (TASK-016). The old boolean `hit` conflated
+ * "screened clear" with "could not screen", so a missing/empty/stale list
+ * or an un-representable name silently read as clear. These four states
+ * are disjoint and a clearance is the ONLY one that may gate activation.
+ *
+ *   VERIFIED_CLEAR       — screened against fresh, sufficiently-current data
+ *                          for the full required source set, no match.
+ *   POSSIBLE_MATCH       — exact normalised-name match, no DOB corroboration
+ *                          (a namesake may collide) → authorised review.
+ *   CONFIRMED_MATCH      — normalised-name AND date-of-birth match.
+ *   SCREENING_UNAVAILABLE — screening could not be performed reliably
+ *                          (list missing / empty / stale, name not
+ *                          representable by this matcher, or an error).
+ */
+export type ScreeningStatus =
+  | 'VERIFIED_CLEAR'
+  | 'POSSIBLE_MATCH'
+  | 'CONFIRMED_MATCH'
+  | 'SCREENING_UNAVAILABLE';
+
 export interface ScreeningResult {
-  hit: boolean;
+  status: ScreeningStatus;
   snapshotId?: string;
+  /** Machine code for why screening was UNAVAILABLE — never PII. */
+  unavailableReason?: string;
   evidence?: Record<string, unknown>;
 }
 
+export const isSanctionsClear = (r: ScreeningResult): boolean => r.status === 'VERIFIED_CLEAR';
+export const isSanctionsMatch = (r: ScreeningResult): boolean =>
+  r.status === 'POSSIBLE_MATCH' || r.status === 'CONFIRMED_MATCH';
+
 /**
- * Screen one identity against the latest snapshot of every enabled
- * source. Returns a hit on the FIRST matching source — for the
- * `evidence` payload we record which source, which entry, and the
- * snapshot id so the incident is fully reproducible.
- *
- * Tie-break: if multiple list entries share the normalised name and we
- * have a DOB on the subject, we prefer the entry whose DOB matches
- * exactly. If no DOB on the subject, name-only match is enough to
- * flag — false-positives drop into ops review rather than auto-block
- * irreversibly (the OPEN status on the incident triggers a freeze, not
- * a permanent rejection).
+ * A screenable identity requires a name the ASCII-fold matcher can
+ * actually evaluate. A missing name, or a name carrying non-Latin letters
+ * (e.g. Arabic script) that the current normaliser cannot transliterate,
+ * is NOT cleared — it is UNAVAILABLE. Full Arabic / transliteration
+ * matching needs a dedicated provider (reported BLOCKED); until then such
+ * names fail closed rather than silently bypass.
+ */
+export function classifyNameForScreening(name: string): {
+  normalised: string;
+  evaluable: boolean;
+  reason?: string;
+} {
+  if (!name || !name.trim()) return { normalised: '', evaluable: false, reason: 'name_missing' };
+  const stripped = name.normalize('NFKD').replace(/[̀-ͯ]/g, '');
+  // A letter (\p{L}) that is not a basic Latin a–z/A–Z letter → a script
+  // this matcher cannot represent. Deterministic and explainable.
+  if (/[^\P{L}a-zA-Z]/u.test(stripped)) {
+    return { normalised: normaliseName(name), evaluable: false, reason: 'unsupported_script' };
+  }
+  const normalised = normaliseName(name);
+  if (!normalised) return { normalised, evaluable: false, reason: 'name_unrepresentable' };
+  return { normalised, evaluable: true };
+}
+
+/** Snapshot must have been ingested within this window to count as current. */
+export const SANCTIONS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * VERIFIED_CLEAR requires fresh coverage of EVERY source in this set. It
+ * is intentionally the full enumerated list: a clearance that silently
+ * skips a source it has no data for is exactly the fail-open this task
+ * removes. Tune only with compliance sign-off.
+ */
+export const REQUIRED_SANCTIONS_SOURCES: readonly SanctionsListSource[] =
+  Object.values(SanctionsListSource);
+
+/**
+ * Screen one identity. Fails CLOSED: it returns VERIFIED_CLEAR ONLY when
+ * every required source has a non-empty snapshot ingested inside
+ * SANCTIONS_MAX_AGE_MS and none matches. Missing / empty / stale data, an
+ * un-representable name, or any error yields SCREENING_UNAVAILABLE — never
+ * a clearance. A normalised-name match is POSSIBLE_MATCH, upgraded to
+ * CONFIRMED_MATCH when the subject's date of birth also matches.
  */
 export async function screenIdentityAgainstSanctions(
   input: ScreeningInput,
 ): Promise<ScreeningResult> {
-  const normalised = normaliseName(input.fullName);
-  if (!normalised) return { hit: false };
+  const { normalised, evaluable, reason } = classifyNameForScreening(input.fullName);
+  if (!evaluable) return { status: 'SCREENING_UNAVAILABLE', unavailableReason: reason };
 
-  const sources = Object.values(SanctionsListSource);
-  for (const source of sources) {
-    const latest = await prisma.sanctionsListSnapshot.findFirst({
-      where: { source },
-      orderBy: { ingestedAt: 'desc' },
-    });
-    if (!latest) continue;
-
-    const candidates = await prisma.sanctionsListEntry.findMany({
-      where: { snapshotId: latest.id, normalisedName: normalised },
-    });
-    if (candidates.length === 0) continue;
-
-    // DOB tie-break.
-    let match = candidates[0];
-    if (input.dateOfBirth) {
-      const dobMatch = candidates.find(
-        (c) =>
-          c.dateOfBirth && c.dateOfBirth.toISOString().slice(0, 10) ===
-            input.dateOfBirth!.toISOString().slice(0, 10),
-      );
-      if (dobMatch) match = dobMatch;
+  try {
+    const now = Date.now();
+    const freshSnapshots: Array<{ source: SanctionsListSource; id: string; publishedAt: Date }> = [];
+    for (const source of REQUIRED_SANCTIONS_SOURCES) {
+      const latest = await prisma.sanctionsListSnapshot.findFirst({
+        where: { source },
+        orderBy: { ingestedAt: 'desc' },
+      });
+      if (!latest) return { status: 'SCREENING_UNAVAILABLE', unavailableReason: 'list_missing' };
+      if (latest.entryCount <= 0) return { status: 'SCREENING_UNAVAILABLE', unavailableReason: 'list_empty' };
+      if (now - latest.ingestedAt.getTime() > SANCTIONS_MAX_AGE_MS) {
+        return { status: 'SCREENING_UNAVAILABLE', unavailableReason: 'list_stale' };
+      }
+      freshSnapshots.push({ source, id: latest.id, publishedAt: latest.publishedAt });
     }
 
-    return {
-      hit: true,
-      snapshotId: latest.id,
-      evidence: {
-        source,
-        snapshotPublishedAt: latest.publishedAt.toISOString(),
-        matchedExternalRef: match.externalRef,
-        matchedFullName: match.fullName,
-        matchedDateOfBirth: match.dateOfBirth?.toISOString().slice(0, 10) ?? null,
-        matchedNationality: match.nationality,
-        subjectNormalisedName: normalised,
-        candidateCount: candidates.length,
-      },
-    };
-  }
+    for (const snap of freshSnapshots) {
+      const candidates = await prisma.sanctionsListEntry.findMany({
+        where: { snapshotId: snap.id, normalisedName: normalised },
+      });
+      if (candidates.length === 0) continue;
 
-  return { hit: false };
+      let match = candidates[0];
+      let dobCorroborated = false;
+      if (input.dateOfBirth) {
+        const dobMatch = candidates.find(
+          (c) =>
+            c.dateOfBirth &&
+            c.dateOfBirth.toISOString().slice(0, 10) === input.dateOfBirth!.toISOString().slice(0, 10),
+        );
+        if (dobMatch) {
+          match = dobMatch;
+          dobCorroborated = true;
+        }
+      }
+
+      return {
+        status: dobCorroborated ? 'CONFIRMED_MATCH' : 'POSSIBLE_MATCH',
+        snapshotId: snap.id,
+        evidence: {
+          source: snap.source,
+          matchType: dobCorroborated ? 'name_and_dob' : 'name_only',
+          snapshotPublishedAt: snap.publishedAt.toISOString(),
+          matchedExternalRef: match.externalRef,
+          matchedFullName: match.fullName,
+          matchedDateOfBirth: match.dateOfBirth?.toISOString().slice(0, 10) ?? null,
+          matchedNationality: match.nationality,
+          subjectNormalisedName: normalised,
+          candidateCount: candidates.length,
+        },
+      };
+    }
+
+    // Fresh coverage of every required source, no match: the only clearance.
+    return { status: 'VERIFIED_CLEAR' };
+  } catch (err) {
+    // A screening failure must never read as clear. Reason only — no PII.
+    logger.error('sanctions screening failed — treating as unavailable', {
+      error: (err as Error).message,
+    });
+    return { status: 'SCREENING_UNAVAILABLE', unavailableReason: 'screening_error' };
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -255,7 +334,11 @@ export async function rescreenActiveEmployees(): Promise<{
   let newHits = 0;
   for (const e of activeEmployees) {
     const screening = await screenIdentityAgainstSanctions({ fullName: e.fullName });
-    if (!screening.hit) continue;
+    // Only a POSSIBLE/CONFIRMED match opens an incident. SCREENING_UNAVAILABLE
+    // (no fresh data, un-representable name) is a monitoring gap, not a
+    // clearance and not a hit — it is surfaced via logs/metrics, never by
+    // silently treating the employee as clear.
+    if (!isSanctionsMatch(screening)) continue;
 
     // De-dupe: if an unresolved SANCTIONS_HIT already exists for this
     // employee, don't stack another one. The most recent screening

@@ -1,6 +1,6 @@
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import request from 'supertest';
-import { KycDocumentType } from '@prisma/client';
+import { KycDocumentType, SanctionsListSource } from '@prisma/client';
 import { app } from '@/app';
 import { prisma } from '@config/prisma';
 import redisService from '@config/redis';
@@ -14,6 +14,32 @@ import {
   validateEmiratesId,
   type EmiratesIdExtractor,
 } from '@modules/compliance/kyc.service';
+
+/**
+ * TASK-016 made activation require a genuine sanctions clearance, so these
+ * KYC-approval tests seed fresh, non-matching sanctions snapshots for every
+ * required source first (screening then returns VERIFIED_CLEAR). Without
+ * them, screening would be SCREENING_UNAVAILABLE and no account activates.
+ */
+async function seedFreshClearSanctionsLists(): Promise<void> {
+  for (const source of Object.values(SanctionsListSource)) {
+    const snap = await prisma.sanctionsListSnapshot.create({
+      data: {
+        source,
+        publishedAt: new Date(),
+        entryCount: 1,
+        checksumSha256: createHash('sha256').update(`kyc-e2e:${source}:${randomBytes(6).toString('hex')}`).digest('hex'),
+      },
+    });
+    await prisma.sanctionsListEntry.create({
+      data: { snapshotId: snap.id, externalRef: `benign-${source}`, fullName: 'Totally Unrelated Person', normalisedName: 'totally unrelated person' },
+    });
+  }
+}
+async function clearSanctionsData(): Promise<void> {
+  await prisma.sanctionsListEntry.deleteMany({});
+  await prisma.sanctionsListSnapshot.deleteMany({});
+}
 
 /**
  * TASK-015 — a new employee must never become financially ACTIVE from card
@@ -92,9 +118,12 @@ describe('KYC activation gating — real app + PostgreSQL (TASK-015)', () => {
   beforeAll(async () => {
     await prisma.$connect();
     await redisService.connect();
+    await clearSanctionsData();
+    await seedFreshClearSanctionsLists(); // TASK-016: screening must be able to clear
   });
   afterEach(() => setKycExtractor(throwingExtractor())); // default fail-closed between tests
   afterAll(async () => {
+    await clearSanctionsData();
     const emps = await prisma.employee.findMany({ where: { id: { in: employees } }, select: { id: true } });
     const ids = emps.map((e) => e.id);
     await prisma.complianceIncident.deleteMany({ where: { employeeId: { in: ids } } });
