@@ -14,6 +14,7 @@ import { generateOTP } from '@shared/utils/otp';
 import { generateReferralCode } from '@shared/utils/referralCode';
 import { AppError, Conflict, Unauthorized, Forbidden } from '@shared/utils/errors';
 import logger from '@shared/utils/logger';
+import { hashIdentifier } from '@shared/security/pii-crypto';
 import { twilioService } from './twilio.service';
 import { nymcardService } from '@modules/cards/nymcard.service';
 
@@ -24,7 +25,9 @@ export class AuthService {
     const otp = generateOTP();
     await redisService.storeOTP(phone, otp);
     await twilioService.sendOTP(phone, otp);
-    logger.info('OTP sent', { phone, otpLength: otp.length });
+    // TASK-017: the phone number is a direct identifier — log a short,
+    // non-reversible hash prefix for correlation instead of the plaintext.
+    logger.info('OTP sent', { phoneHash: hashIdentifier(phone).slice(0, 12), otpLength: otp.length });
     return { message: 'OTP sent successfully' };
   }
 

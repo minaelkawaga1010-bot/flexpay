@@ -58,7 +58,9 @@ export class NymCardService {
 
   async createCustomer(input: { name: string; email: string; phone: string }): Promise<NymCardCustomer> {
     if (!this.isConfigured) {
-      logger.info('[nymcard:stub] createCustomer', input);
+      // TASK-017: `input` holds name / email / phone — direct identifiers.
+      // Log only that the stub ran; never the customer PII.
+      logger.info('[nymcard:stub] createCustomer (PII redacted)');
       return { id: `cust_${randomUUID()}`, ...input };
     }
     return this.withRetry(async () => {

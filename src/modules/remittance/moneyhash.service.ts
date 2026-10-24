@@ -48,7 +48,9 @@ class MoneyHashService {
   async createTransfer(req: RemittanceRequest): Promise<string> {
     if (!env.MONEYHASH_API_KEY) {
       const id = `mh_${randomUUID()}`;
-      logger.info('[moneyhash:stub] createTransfer', { req, id });
+      // TASK-017: never log the beneficiary (name / bank account / SWIFT) —
+      // identifiers + financial PII. Non-sensitive fields only.
+      logger.info('[moneyhash:stub] createTransfer', { id, currency: req.currency, reference: req.reference });
       return id;
     }
     const { data } = await this.client.post('/transfers', req);
