@@ -14,6 +14,18 @@ export interface ListTransactionsArgs {
   endDate?: Date | string;
 }
 
+/**
+ * TASK-018.0: mask a counterparty phone for display — keep only the last 4
+ * digits so the owner can still recognise the transaction without the full
+ * number of another person leaking through their history.
+ */
+function maskPhone(phone: string | null | undefined): string | null {
+  if (!phone) return phone ?? null;
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length <= 4) return '••••';
+  return `••••${digits.slice(-4)}`;
+}
+
 export class WalletService {
   async getBalance(employeeId: string): Promise<number> {
     const employee = await prisma.employee.findUnique({
@@ -62,8 +74,17 @@ export class WalletService {
       prisma.employeeTransaction.count({ where }),
     ]);
 
+    // TASK-018.0: a RECEIVE row's counterpartyPhone is the sender's number —
+    // another person's PII. Mask it in the customer-facing history response
+    // (display only; the stored structured reference is unchanged) so one
+    // customer's history never discloses another's full phone number.
+    const masked = transactions.map((t) => ({
+      ...t,
+      counterpartyPhone: maskPhone(t.counterpartyPhone),
+    }));
+
     return {
-      transactions,
+      transactions: masked,
       pagination: { total, limit, offset, hasMore: offset + limit < total },
     };
   }
@@ -145,7 +166,10 @@ export class WalletService {
           fee,
           totalAmount: -total,
           status: 'COMPLETED',
-          description: `P2P to ${recipient.phone}`,
+          // TASK-018.0: a neutral, structured description — the counterparty's
+          // phone is NOT persisted in free text. Traceability is preserved by
+          // the type (TRANSFER) + counterpartyId.
+          description: 'P2P transfer sent',
           counterpartyId: recipient.id,
           counterpartyPhone: recipient.phone,
           idempotencyKey: idempotencyKey ?? null,
@@ -159,7 +183,9 @@ export class WalletService {
           fee: 0,
           totalAmount: amount,
           status: 'COMPLETED',
-          description: `P2P from ${sender.phone}`,
+          // TASK-018.0: neutral description; the sender's phone is not
+          // persisted in free text (counterpartyId carries traceability).
+          description: 'P2P transfer received',
           counterpartyId: sender.id,
           counterpartyPhone: sender.phone,
         },

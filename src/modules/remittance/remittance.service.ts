@@ -107,7 +107,11 @@ async function reserve(
           fee: quote.fee,
           totalAmount: quote.totalDebit,
           status: TransactionStatus.PENDING,
-          description: `Remittance to ${beneficiary.name} (${currency})`,
+          // TASK-018.0: the beneficiary name is sent to MoneyHash in the
+          // transfer request (where it is required) but is NOT persisted in
+          // this internal description. Currency is kept for accounting meaning;
+          // the row's reference / merchantName carry traceability.
+          description: `Remittance (${currency})`,
           reference,
           location: { country: currency } as Prisma.InputJsonValue,
           merchantName: 'MoneyHash',

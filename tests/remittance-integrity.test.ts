@@ -399,6 +399,9 @@ describe('remittanceService.send', () => {
     expect(created.status).toBe(TransactionStatus.PENDING);
     expect(created.type).toBe(TransactionType.REMITTANCE);
     expect(created.idempotencyKey).toBe('moneyhash:remittance:emp-1:quote:q1');
+    // TASK-018.0: the beneficiary name is NOT persisted in the description.
+    expect(created.description).toBe('Remittance (EGP)');
+    expect(created.description).not.toContain(BENEFICIARY.name);
     // Reserve precedes the provider call; the transferId is bound after
     expect(mocked.$transaction.mock.invocationCallOrder[0]).toBeLessThan(createTransfer.mock.invocationCallOrder[0]);
     expect(mocked.employeeTransaction.update).toHaveBeenCalledWith({ where: { id: 'rem-1' }, data: { reference: 'mh-transfer-1' } });
