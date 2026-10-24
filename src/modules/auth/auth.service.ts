@@ -154,9 +154,12 @@ export class AuthService {
         }),
         prisma.employee.update({
           where: { id: employee.id },
+          // TASK-015: issuing a virtual card binds the NymCard customer id
+          // but must NEVER activate the account. The employee stays
+          // PENDING_KYC until an authorised, verified KYC approval
+          // (kyc.service.submitKycDocument → VERIFIED) flips the status.
           data: {
             nymcardCustomerId: customer.id,
-            status: EmployeeStatus.ACTIVE,
           },
         }),
       ]);

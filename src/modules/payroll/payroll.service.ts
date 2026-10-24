@@ -59,14 +59,14 @@ export class PayrollService {
       },
     });
 
+    // TASK-015: provisioning a virtual card for an employer-created employee
+    // must NOT activate the account. Employer onboarding never implies KYC —
+    // the employee stays PENDING_KYC until an authorised, verified KYC
+    // approval activates them. A card-issuance failure is non-fatal.
     try {
       await cardsService.issueVirtualCard(employee.id);
-      await prisma.employee.update({
-        where: { id: employee.id },
-        data: { status: EmployeeStatus.ACTIVE },
-      });
     } catch {
-      // status stays PENDING_KYC; can be retried by the user later
+      // Card can be retried later; account status is unaffected either way.
     }
 
     await twilioService.sendWelcomeSMS(employee.phone);
