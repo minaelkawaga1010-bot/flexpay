@@ -148,6 +148,15 @@ model Employee {
   fullNameEncrypted     String?             // AES-256-GCM envelope of fullName
   salary                Float?
   salaryEncrypted       String?             // AES-256-GCM envelope of salary
+  // TASK-018.1: additive, nullable envelope/blind-index columns for the
+  // phone and email PII fields, mirroring fullNameEncrypted/salaryEncrypted
+  // and the existing phoneHash. NOT populated by any code yet (dual-write,
+  // backfill, blind-index computation and key management are later,
+  // separately-approved phases). No constraints/defaults so existing rows
+  // and reads are unaffected.
+  phoneEncrypted        String?             // AES-256-GCM envelope of E.164(phone)
+  emailEncrypted        String?             // AES-256-GCM envelope of lower(trim(email))
+  emailHash             String?             // HMAC blind index of lower(trim(email)) — equality lookup (future)
 
   walletBalance         Float               @default(0)
   plan                  PlanType            @default(BASIC)
