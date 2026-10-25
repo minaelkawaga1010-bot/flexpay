@@ -18,3 +18,6 @@ process.env.REDIS_URL = 'redis://localhost:6379';
 // A.7 PII crypto — deterministic 32-byte (base64) data key for the
 // envelope-encryption unit tests. NOT a production key.
 process.env.PII_DATA_KEY = Buffer.alloc(32, 7).toString('base64');
+// TASK-018.2: disposable blind-index key, DISTINCT from PII_DATA_KEY. NOT a
+// production key.
+process.env.PII_BLIND_INDEX_KEY = Buffer.alloc(32, 19).toString('base64');

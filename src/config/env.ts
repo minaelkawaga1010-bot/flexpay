@@ -85,6 +85,13 @@ const envSchema = z.object({
   // dev/test a static key is acceptable. Optional so unit tests that
   // never touch crypto still boot.
   PII_DATA_KEY: z.string().optional(),
+  // TASK-018.2: base64-encoded 32-byte key for the HMAC-SHA256 email blind
+  // index. CRYPTOGRAPHICALLY SEPARATE from PII_DATA_KEY (DEK) — never the
+  // same key. In production this is a KMS-unwrapped key injected at boot;
+  // in dev/test a static disposable key. Optional so code paths that never
+  // compute a blind index still boot; the dual-write path fails closed when
+  // it is required but absent.
+  PII_BLIND_INDEX_KEY: z.string().optional(),
   // AWS KMS envelope unwrap (production DEK source). At boot the infra
   // layer calls KMS Decrypt on KMS_WRAPPED_DEK (a base64 KMS ciphertext
   // blob) and holds the plaintext 32-byte DEK in memory — KMS is never

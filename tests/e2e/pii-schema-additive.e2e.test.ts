@@ -28,7 +28,7 @@ describe('additive PII columns are inert; plaintext + uniqueness unchanged (TASK
     await prisma.$disconnect();
   });
 
-  it('registration populates plaintext fields and leaves the new encrypted/blind-index columns NULL', async () => {
+  it('registration keeps plaintext; TASK-018.2 dual-writes phoneEncrypted; the rest stay NULL', async () => {
     const p = phone();
     await redisService.storeOTP(p, '123456');
     const res = await request(app)
@@ -41,14 +41,15 @@ describe('additive PII columns are inert; plaintext + uniqueness unchanged (TASK
     // Plaintext behaviour unchanged.
     expect(row.phone).toBe(p);
     expect(row.fullName).toBe('Additive Schema');
-    // New columns present in the type but never written → NULL.
-    expect(row.phoneEncrypted).toBeNull();
+    // TASK-018.2: phone is now dual-written to its envelope column…
+    expect(row.phoneEncrypted).not.toBeNull();
+    // …while email columns stay NULL (no email at registration) and the
+    // fields not in scope for encryption remain NULL.
     expect(row.emailEncrypted).toBeNull();
     expect(row.emailHash).toBeNull();
-    // Pre-existing (also-unwired) envelope columns remain NULL too.
     expect(row.fullNameEncrypted).toBeNull();
     expect(row.salaryEncrypted).toBeNull();
-    expect(row.phoneHash).toBeNull();
+    expect(row.phoneHash).toBeNull(); // untouched
   });
 
   it('phone uniqueness is still enforced by the plaintext column', async () => {

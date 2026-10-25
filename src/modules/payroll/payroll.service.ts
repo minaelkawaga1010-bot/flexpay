@@ -5,6 +5,7 @@ import { generateReferralCode } from '@shared/utils/referralCode';
 import logger from '@shared/utils/logger';
 import { twilioService } from '@modules/auth/twilio.service';
 import { cardsService } from '@modules/cards/cards.service';
+import { protectEmployeePhone, protectEmployeeEmail } from '@shared/security/employee-pii';
 import { enqueueNotification } from '@modules/notifications/notification.job';
 import { AddEmployeeDto, SchedulePayrollDto } from './payroll.dto';
 import { enqueuePayrollJob } from './payroll.job';
@@ -52,6 +53,10 @@ export class PayrollService {
         fullName: input.fullName,
         phone: input.phone,
         email: input.email,
+        // TASK-018.2: dual-write phone + email protected columns atomically
+        // with the plaintext columns (fail-closed on a missing key).
+        ...protectEmployeePhone(input.phone),
+        ...protectEmployeeEmail(input.email),
         salary: input.salary,
         companyId,
         referralCode: generateReferralCode(),
@@ -83,7 +88,12 @@ export class PayrollService {
     if (employee.companyId !== companyId) {
       throw Forbidden('Employee does not belong to this company');
     }
-    return prisma.employee.update({ where: { id: employeeId }, data: patch });
+    // TASK-018.2: when the email is being updated, dual-write its protected
+    // columns atomically in the same UPDATE (fail-closed on a missing key).
+    // phone is not updatable through this path, so no phone re-encryption.
+    const data: typeof patch & { emailEncrypted?: string | null; emailHash?: string | null } = { ...patch };
+    if (patch.email !== undefined) Object.assign(data, protectEmployeeEmail(patch.email));
+    return prisma.employee.update({ where: { id: employeeId }, data });
   }
 
   async removeEmployee(companyId: string, employeeId: string) {

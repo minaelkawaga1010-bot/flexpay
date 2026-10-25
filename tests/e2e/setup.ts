@@ -17,6 +17,10 @@ process.env.NYMCARD_WEBHOOK_BASIC_PASSWORD = randomBytes(32).toString('hex');
 process.env.MONEYHASH_WEBHOOK_SECRET = randomBytes(32).toString('hex');
 process.env.FLEXXPAY_WEBHOOK_SECRET = randomBytes(32).toString('hex');
 process.env.BILLER_WEBHOOK_SECRET = randomBytes(32).toString('hex');
+// TASK-018.2: PII encryption + blind-index keys for the dual-write path
+// (service-level Employee creates). Disposable, DISTINCT keys — NOT production.
+process.env.PII_DATA_KEY = Buffer.alloc(32, 7).toString('base64');
+process.env.PII_BLIND_INDEX_KEY = Buffer.alloc(32, 19).toString('base64');
 
 // Defaults that match docker-compose. Override via your shell when needed.
 process.env.DATABASE_URL ??= 'postgresql://flexpay:securepass@localhost:5432/flexpay?schema=public';

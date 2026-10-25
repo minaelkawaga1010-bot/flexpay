@@ -15,6 +15,7 @@ import { generateReferralCode } from '@shared/utils/referralCode';
 import { AppError, Conflict, Unauthorized, Forbidden } from '@shared/utils/errors';
 import logger from '@shared/utils/logger';
 import { hashIdentifier } from '@shared/security/pii-crypto';
+import { protectEmployeePhone } from '@shared/security/employee-pii';
 import { twilioService } from './twilio.service';
 import { nymcardService } from '@modules/cards/nymcard.service';
 
@@ -110,6 +111,10 @@ export class AuthService {
       const created = await tx.employee.create({
         data: {
           phone: input.phone,
+          // TASK-018.2: dual-write the phone envelope atomically with the
+          // plaintext column (fail-closed: throws before the write if the
+          // DEK is missing). phoneHash is intentionally NOT touched.
+          ...protectEmployeePhone(input.phone),
           fullName: input.fullName,
           salary: input.salary,
           companyId: input.companyId,
