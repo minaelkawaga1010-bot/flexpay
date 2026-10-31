@@ -8,17 +8,23 @@
 -- the rolling-window scans degrade to sequential scans on growing
 -- tables.
 --
--- CONCURRENTLY: build without an ACCESS EXCLUSIVE lock so payday write
--- traffic is not blocked during the migration. NOTE: CREATE INDEX
--- CONCURRENTLY cannot run inside a transaction block — Prisma wraps
--- each migration in a transaction by default, so this migration must
--- be applied with the transaction disabled. Run via:
---   prisma migrate resolve / apply with --no-transaction, or execute
---   this SQL directly against the database outside a txn.
+-- TASK-018.4B: CONCURRENTLY was removed from these two statements so the
+-- migration history replays inside Prisma's per-migration transaction.
+-- A multi-statement migration file is executed by Prisma as a single
+-- multi-statement simple-query, which PostgreSQL runs in an implicit
+-- transaction block where CREATE INDEX CONCURRENTLY is rejected with
+-- SQLSTATE 25001 — that blocked `prisma migrate dev` / shadow-database
+-- replay. The index names, target tables, columns, column ordering and
+-- IF NOT EXISTS are UNCHANGED. On a fresh/empty database (the baseline
+-- bootstrap path) these build instantly; where they already exist,
+-- IF NOT EXISTS makes them a no-op. A plain CREATE INDEX takes a lock
+-- that blocks writes while building, so this file must NOT be executed
+-- against a large, already-populated table that still lacks the index —
+-- see the migration runbook (docs/MIGRATION_BASELINE_RUNBOOK.md).
 -- ====================================================================
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "advances_status_requestedAt_idx"
+CREATE INDEX IF NOT EXISTS "advances_status_requestedAt_idx"
   ON "advances" ("status", "requestedAt");
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "payroll_cycles_status_periodEnd_idx"
+CREATE INDEX IF NOT EXISTS "payroll_cycles_status_periodEnd_idx"
   ON "payroll_cycles" ("status", "periodEnd");

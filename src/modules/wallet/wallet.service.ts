@@ -2,6 +2,7 @@ import { Prisma, TransactionType } from '@prisma/client';
 import { prisma } from '@config/prisma';
 import { env } from '@config/env';
 import { BadRequest, Forbidden, NotFound } from '@shared/utils/errors';
+import { acquireWorkerLockScoped, LockScope } from '@shared/utils/advisory-lock';
 import { enqueueNotification } from '@modules/notifications/notification.job';
 import { referralsService } from '@modules/referrals/referrals.service';
 
@@ -11,6 +12,18 @@ export interface ListTransactionsArgs {
   type?: TransactionType;
   startDate?: Date | string;
   endDate?: Date | string;
+}
+
+/**
+ * TASK-018.0: mask a counterparty phone for display — keep only the last 4
+ * digits so the owner can still recognise the transaction without the full
+ * number of another person leaking through their history.
+ */
+function maskPhone(phone: string | null | undefined): string | null {
+  if (!phone) return phone ?? null;
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length <= 4) return '••••';
+  return `••••${digits.slice(-4)}`;
 }
 
 export class WalletService {
@@ -61,8 +74,17 @@ export class WalletService {
       prisma.employeeTransaction.count({ where }),
     ]);
 
+    // TASK-018.0: a RECEIVE row's counterpartyPhone is the sender's number —
+    // another person's PII. Mask it in the customer-facing history response
+    // (display only; the stored structured reference is unchanged) so one
+    // customer's history never discloses another's full phone number.
+    const masked = transactions.map((t) => ({
+      ...t,
+      counterpartyPhone: maskPhone(t.counterpartyPhone),
+    }));
+
     return {
-      transactions,
+      transactions: masked,
       pagination: { total, limit, offset, hasMore: offset + limit < total },
     };
   }
@@ -94,6 +116,12 @@ export class WalletService {
     }
 
     return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      // TASK-002: serialize same-worker wallet debits under the shared
+      // WALLET_DEBIT scope (consistent with bill-payment). The sender
+      // balance is read AFTER the lock, so no competing WALLET_DEBIT
+      // holder can shift it between the read and the debit.
+      await acquireWorkerLockScoped(tx, senderId, LockScope.WALLET_DEBIT);
+
       const sender = await tx.employee.findFirst({ where: { id: senderId, status: 'ACTIVE' } });
       if (!sender) throw NotFound('SENDER_NOT_FOUND');
 
@@ -105,12 +133,24 @@ export class WalletService {
 
       const fee = sender.plan === 'LUXURY' ? 0 : env.P2P_TRANSFER_FEE;
       const total = amount + fee;
+      // Fast path: fail early on a clearly-insufficient balance without
+      // attempting the write. NOT the authoritative guard (the read is a
+      // snapshot) — the guarded update below is.
       if (sender.walletBalance < total) throw BadRequest('INSUFFICIENT_BALANCE');
 
-      await tx.employee.update({
-        where: { id: sender.id },
+      // Authoritative guarded debit. The `walletBalance >= total`
+      // predicate is evaluated by the database as part of the same
+      // UPDATE statement, so the balance can NEVER be driven negative —
+      // even by a competing debit path that does not take the advisory
+      // lock (remittance / cards / savings today, see TASK-002 notes).
+      // count !== 1 ⇒ insufficient balance at write time ⇒ throw to roll
+      // the whole transaction back.
+      const debit = await tx.employee.updateMany({
+        where: { id: sender.id, walletBalance: { gte: total } },
         data: { walletBalance: { decrement: total } },
       });
+      if (debit.count !== 1) throw BadRequest('INSUFFICIENT_BALANCE');
+
       await tx.employee.update({
         where: { id: recipient.id },
         data: { walletBalance: { increment: amount } },
@@ -126,7 +166,10 @@ export class WalletService {
           fee,
           totalAmount: -total,
           status: 'COMPLETED',
-          description: `P2P to ${recipient.phone}`,
+          // TASK-018.0: a neutral, structured description — the counterparty's
+          // phone is NOT persisted in free text. Traceability is preserved by
+          // the type (TRANSFER) + counterpartyId.
+          description: 'P2P transfer sent',
           counterpartyId: recipient.id,
           counterpartyPhone: recipient.phone,
           idempotencyKey: idempotencyKey ?? null,
@@ -140,7 +183,9 @@ export class WalletService {
           fee: 0,
           totalAmount: amount,
           status: 'COMPLETED',
-          description: `P2P from ${sender.phone}`,
+          // TASK-018.0: neutral description; the sender's phone is not
+          // persisted in free text (counterpartyId carries traceability).
+          description: 'P2P transfer received',
           counterpartyId: sender.id,
           counterpartyPhone: sender.phone,
         },

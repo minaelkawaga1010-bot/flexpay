@@ -27,7 +27,9 @@ class FlexxPayService {
   async createAdvanceRequest(req: AdvanceRequest): Promise<string> {
     if (!env.FLEXXPAY_API_KEY) {
       const id = `fxp_${randomUUID()}`;
-      logger.info('[flexxpay:stub] createAdvanceRequest', { req, id });
+      // TASK-017: never log the employee name / phone — identifiers. Only
+      // the non-PII employer id and the generated stub id.
+      logger.info('[flexxpay:stub] createAdvanceRequest', { id, employerId: req.employerId });
       return `${env.FLEXXPAY_API_BASE}/redirect/${id}?return=${encodeURIComponent(req.returnUrl)}`;
     }
     const { data } = await this.client.post('/advances', req);

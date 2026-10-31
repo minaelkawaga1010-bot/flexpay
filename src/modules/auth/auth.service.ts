@@ -14,6 +14,8 @@ import { generateOTP } from '@shared/utils/otp';
 import { generateReferralCode } from '@shared/utils/referralCode';
 import { AppError, Conflict, Unauthorized, Forbidden } from '@shared/utils/errors';
 import logger from '@shared/utils/logger';
+import { hashIdentifier } from '@shared/security/pii-crypto';
+import { protectEmployeePhone } from '@shared/security/employee-pii';
 import { twilioService } from './twilio.service';
 import { nymcardService } from '@modules/cards/nymcard.service';
 
@@ -24,7 +26,9 @@ export class AuthService {
     const otp = generateOTP();
     await redisService.storeOTP(phone, otp);
     await twilioService.sendOTP(phone, otp);
-    logger.info('OTP sent', { phone, otpLength: otp.length });
+    // TASK-017: the phone number is a direct identifier — log a short,
+    // non-reversible hash prefix for correlation instead of the plaintext.
+    logger.info('OTP sent', { phoneHash: hashIdentifier(phone).slice(0, 12), otpLength: otp.length });
     return { message: 'OTP sent successfully' };
   }
 
@@ -107,6 +111,10 @@ export class AuthService {
       const created = await tx.employee.create({
         data: {
           phone: input.phone,
+          // TASK-018.2: dual-write the phone envelope atomically with the
+          // plaintext column (fail-closed: throws before the write if the
+          // DEK is missing). phoneHash is intentionally NOT touched.
+          ...protectEmployeePhone(input.phone),
           fullName: input.fullName,
           salary: input.salary,
           companyId: input.companyId,
@@ -154,9 +162,12 @@ export class AuthService {
         }),
         prisma.employee.update({
           where: { id: employee.id },
+          // TASK-015: issuing a virtual card binds the NymCard customer id
+          // but must NEVER activate the account. The employee stays
+          // PENDING_KYC until an authorised, verified KYC approval
+          // (kyc.service.submitKycDocument → VERIFIED) flips the status.
           data: {
             nymcardCustomerId: customer.id,
-            status: EmployeeStatus.ACTIVE,
           },
         }),
       ]);
@@ -296,12 +307,21 @@ export class AuthService {
       throw Unauthorized('INVALID_REFRESH_TOKEN');
     }
 
-    const user =
-      payload.role === 'employee'
-        ? await prisma.employee.findUnique({ where: { id: payload.userId } })
-        : await prisma.company.findUnique({ where: { id: payload.userId } });
+    // There is no admin login, so there is no legitimate admin token to
+    // refresh — an admin-role refresh token is refused outright.
+    if (payload.role === 'admin') throw Unauthorized('INVALID_REFRESH_TOKEN');
 
-    if (!user) throw Unauthorized('USER_NOT_FOUND');
+    // Same gates as login: a blocked employee or a suspended company
+    // cannot mint fresh tokens from an older refresh token.
+    if (payload.role === 'employee') {
+      const employee = await prisma.employee.findUnique({ where: { id: payload.userId } });
+      if (!employee) throw Unauthorized('USER_NOT_FOUND');
+      if (employee.status === EmployeeStatus.BLOCKED) throw Forbidden('ACCOUNT_BLOCKED');
+    } else {
+      const company = await prisma.company.findUnique({ where: { id: payload.userId } });
+      if (!company) throw Unauthorized('USER_NOT_FOUND');
+      if (company.status !== CompanyStatus.ACTIVE) throw Forbidden('ACCOUNT_SUSPENDED');
+    }
 
     return generateTokens({
       userId: payload.userId,

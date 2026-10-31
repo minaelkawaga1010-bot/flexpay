@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { verifyAccessToken, JWTPayload } from '@shared/utils/jwt';
+import { adminSubjectIds } from '@config/env';
 import { prisma } from '@config/prisma';
 import logger from '@shared/utils/logger';
 
@@ -44,6 +45,14 @@ export const authenticate = (requiredRole?: Role) => {
           res.status(401).json({ error: 'COMPANY_NOT_FOUND' });
           return;
         }
+      } else if (payload.role === 'admin') {
+        // There is no admin account store: a validly signed admin-role
+        // token is honoured only for an explicitly allowlisted subject.
+        if (!adminSubjectIds.has(payload.userId)) {
+          logger.warn('Admin-role token refused: subject not allowlisted', { path: req.path });
+          res.status(403).json({ error: 'INSUFFICIENT_PERMISSIONS' });
+          return;
+        }
       }
 
       req.user = { ...payload, id: payload.userId };
@@ -74,7 +83,11 @@ export const optionalAuth = async (
     if (authHeader?.startsWith('Bearer ')) {
       const token = authHeader.substring(7);
       const payload = verifyAccessToken(token);
-      req.user = { ...payload, id: payload.userId };
+      // Same admin rule as authenticate(): never attach an admin identity
+      // for a subject that is not allowlisted.
+      if (payload.role !== 'admin' || adminSubjectIds.has(payload.userId)) {
+        req.user = { ...payload, id: payload.userId };
+      }
     }
   } catch {
     // Allow unauthenticated requests through.

@@ -1,5 +1,6 @@
 import { app } from './app';
-import { env } from '@config/env';
+import { env, isProd } from '@config/env';
+import { productionAdapterIssues } from '@config/integration-safety';
 import { prisma, disconnectPrisma } from '@config/prisma';
 import { closeAllQueues } from '@config/bull';
 import redisService from '@config/redis';
@@ -10,11 +11,30 @@ import { startNotificationWorker } from '@modules/notifications/notification.job
 import { registerCronJobs } from '@modules/savings/savings.job';
 import { setPromptFirewall } from '@shared/security/prompt-firewall';
 import { buildPromptFirewallDeps } from '@shared/security/prompt-firewall-impl';
+import { initialiseKeyProvider } from '@shared/security/pii-crypto';
+import { isStubBillerAdapter } from '@modules/bill-payment/biller-adapter.service';
 
 async function startServer(): Promise<void> {
   try {
+    // TASK-007: runtime-bound money-moving adapters must be real in
+    // production (env-level integrations are already checked in env.ts).
+    // Bind real adapters above this check; it runs before any connection.
+    if (isProd) {
+      const adapterIssues = productionAdapterIssues({ billerAdapterIsStub: isStubBillerAdapter() });
+      if (adapterIssues.length > 0) {
+        throw new Error(`Refusing to start in production: ${adapterIssues.join('; ')}`);
+      }
+    }
+
     await prisma.$connect();
     await redisService.connect();
+
+    // PII key provider (Bible §5.2). Unwrap the DEK via AWS KMS in
+    // production; MockKeyProvider only in development when KMS is
+    // absent. A KMS handshake failure throws here and is caught by the
+    // outer catch → process exits (secure-close) rather than serving
+    // with no usable encryption key.
+    await initialiseKeyProvider();
 
     // Tool 11 — bind the prompt-injection firewall (Bible §5.3.6).
     // HTTP adapters when PRESIDIO_URL / INJECTION_CLASSIFIER_URL are

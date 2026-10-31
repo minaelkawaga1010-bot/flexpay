@@ -89,8 +89,11 @@ describe('Auth — E2E', () => {
     expect(employee).toMatchObject({
       phone: TEST_PHONE,
       fullName: 'E2E Test User',
-      // Card issuance succeeds (stub mode), so we end ACTIVE.
-      status: 'ACTIVE',
+      // TASK-015: a virtual card is issued at registration, but card issuance
+      // never activates the account. The employee stays PENDING_KYC with no
+      // kycVerifiedAt until an authorised KYC approval activates them.
+      status: 'PENDING_KYC',
+      kycVerifiedAt: null,
     });
 
     // OTP was consumed by verify.

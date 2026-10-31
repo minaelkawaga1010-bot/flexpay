@@ -1,11 +1,10 @@
 import { Request, Response, Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '@config/prisma';
-import { env } from '@config/env';
 import redisService from '@config/redis';
 import logger from '@shared/utils/logger';
 import { asyncHandler } from '@shared/utils/asyncHandler';
-import { nymcardService } from '@modules/cards/nymcard.service';
+import { verifyNymCardRequest } from './webhook-security';
 import {
   FRAUD_DECLINE_THRESHOLD,
   getFraudScorer,
@@ -19,7 +18,8 @@ import {
  * must return { decision: "APPROVE" | "DECLINE" } fast — Bible target
  * p95 < 35ms, p99 < 50ms. The pipeline is:
  *
- *   1. HMAC-SHA256 signature verify (constant-time)
+ *   1. nCore Basic Auth (+ optional header) verify, constant-time,
+ *      fail closed (TASK-007)
  *   2. LightGBM/heuristic fraud score (<12ms target)
  *   3. Balance check (Redis 30s cache → NymCard API on miss)
  *   4. Decision
@@ -67,11 +67,15 @@ export class NymCardAuthorizeWebhook {
   private handleAuthorize = async (req: Request, res: Response): Promise<void> => {
     const startedAt = Date.now();
 
-    // 1. Signature. Reuses the same HMAC verifier as the settlement
-    //    webhook. A bad signature is a hard 401 — never score it.
-    const sig = req.header(env.WEBHOOK_SIGNATURE_HEADER) ?? undefined;
-    if (!nymcardService.verifyWebhookSignature(req.body as Buffer, sig)) {
-      res.status(401).json({ error: 'invalid_signature' });
+    // 1. Authentication. Same nCore credentials as the card webhook. A
+    //    bad credential is a hard 401 — never score it; missing or weak
+    //    configuration is a 503 in every environment.
+    const auth = verifyNymCardRequest(req);
+    if (!auth.ok) {
+      logger.warn('nymcard authorize rejected', { reason: auth.reason });
+      res
+        .status(auth.status)
+        .json({ error: auth.status === 503 ? 'webhook_not_configured' : 'invalid_credentials' });
       return;
     }
 

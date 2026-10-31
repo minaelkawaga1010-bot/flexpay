@@ -1,9 +1,15 @@
 generator client {
   provider = "prisma-client-js"
+  // Isolated output path. The backend (../prisma/schema.prisma) emits
+  // its own PostgreSQL client to the default node_modules/.prisma/client
+  // location; both apps share the root node_modules, so the dashboard
+  // MUST emit to a distinct directory or the two clients collide and
+  // clobber each other on `prisma generate`.
+  output   = "../src/generated/prisma"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 

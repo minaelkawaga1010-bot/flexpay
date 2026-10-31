@@ -11,7 +11,7 @@ import { prisma } from '@config/prisma';
 import { BadRequest, NotFound } from '@shared/utils/errors';
 import logger from '@shared/utils/logger';
 import { hashEmiratesId, maskEmiratesId } from '@shared/security/pii-crypto';
-import { screenIdentityAgainstSanctions } from './sanctions.service';
+import { screenIdentityAgainstSanctions, isSanctionsClear, isSanctionsMatch } from './sanctions.service';
 
 /**
  * KYC pipeline — Emirates ID extraction + structural validation +
@@ -237,13 +237,17 @@ export async function submitKycDocument(args: SubmitKycDocumentArgs) {
       },
     });
 
-    // Promote employee on the *primary* identity document only — back
-    // sides, selfies, etc. don't gate the status transition.
+    // Promote the employee on the *primary* identity document only AND only
+    // when sanctions screening returned a genuine clearance (TASK-016).
+    // SCREENING_UNAVAILABLE (missing/empty/stale list, un-representable name,
+    // or a screening error) is NOT a clearance: the account stays PENDING_KYC
+    // and can be re-screened once reliable data is available — it is never
+    // activated on the absence of a result.
     if (
       finalStatus === KycDocumentStatus.VERIFIED &&
       args.documentType === KycDocumentType.EMIRATES_ID_FRONT &&
       employee.status === EmployeeStatus.PENDING_KYC &&
-      !screening.hit
+      isSanctionsClear(screening)
     ) {
       await tx.employee.update({
         where: { id: employee.id },
@@ -255,17 +259,18 @@ export async function submitKycDocument(args: SubmitKycDocumentArgs) {
       });
     }
 
-    // Sanctions hit at KYC time = open SANCTIONS_HIT incident
-    // (severity 5) and force-suspend the account. The block on
-    // reserveAdvance will then fire on every future request.
-    if (screening.hit) {
+    // A POSSIBLE/CONFIRMED sanctions match opens a SANCTIONS_HIT incident
+    // (severity 5) and restricts the account pending authorised review (the
+    // OPEN incident is the review pathway; a name-only POSSIBLE_MATCH is not
+    // auto-classified as confirmed — the match type is recorded in evidence).
+    if (isSanctionsMatch(screening)) {
       await tx.complianceIncident.create({
         data: {
           employeeId: employee.id,
           type: ComplianceIncidentType.SANCTIONS_HIT,
           status: ComplianceIncidentStatus.OPEN,
           severity: 5,
-          evidence: screening.evidence as Prisma.InputJsonValue,
+          evidence: (screening.evidence ?? {}) as Prisma.InputJsonValue,
           sanctionsListSnapshotId: screening.snapshotId,
         },
       });
@@ -273,16 +278,26 @@ export async function submitKycDocument(args: SubmitKycDocumentArgs) {
         where: { id: employee.id },
         data: { status: EmployeeStatus.BLOCKED },
       });
-      logger.warn('kyc sanctions hit', {
+      logger.warn('kyc sanctions match', {
         employeeId: employee.id,
         kycDocumentId: updatedDoc.id,
+        screeningStatus: screening.status,
         snapshotId: screening.snapshotId,
+      });
+    } else if (!isSanctionsClear(screening)) {
+      // Screening could not complete: do not activate, do not block. Reason
+      // code only — never the subject's name or document.
+      logger.warn('kyc screening unavailable — account held PENDING_KYC', {
+        employeeId: employee.id,
+        kycDocumentId: updatedDoc.id,
+        reason: screening.unavailableReason ?? 'unknown',
       });
     }
 
     return {
       kycDocument: updatedDoc,
-      sanctionsHit: screening.hit,
+      screeningStatus: screening.status,
+      sanctionsHit: isSanctionsMatch(screening),
     };
   });
 }

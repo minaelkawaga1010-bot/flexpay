@@ -10,7 +10,6 @@ import { checkDatabaseHealth } from '@config/prisma';
 import { checkQueueHealth } from '@config/bull';
 import { errorHandler, notFoundHandler } from '@shared/middleware/error-handler';
 import { apiRateLimiter } from '@shared/middleware/rate-limit';
-import { idempotency } from '@shared/utils/idempotency';
 
 // Controllers
 import { authController } from '@modules/auth/auth.controller';
@@ -103,16 +102,12 @@ app.get('/health', async (_req: Request, res: Response) => {
 app.use(env.API_PREFIX, apiRateLimiter);
 
 // Bible §5.3.7 — idempotency-key enforcement on every payment-class
-// surface. The middleware is a no-op when no Idempotency-Key header
-// is present, but a key + replay produces the original cached
-// response without re-running the handler. Mounted BEFORE the
-// per-controller routers so it applies uniformly.
-app.use(`${env.API_PREFIX}/wallet`, idempotency);
-app.use(`${env.API_PREFIX}/ewa`, idempotency);
-app.use(`${env.API_PREFIX}/remittance`, idempotency);
-app.use(`${env.API_PREFIX}/mobile/wallet`, idempotency);
-app.use(`${env.API_PREFIX}/admin/payroll`, idempotency);
-
+// surface. TASK-013: the middleware MUST run after authentication so each
+// record is scoped to the authenticated principal; it is therefore applied
+// inside each controller's router (on the mutating routes), after that
+// router's `authenticate(...)`, never app-level before the routers. A
+// pre-auth mount here would key records to an anonymous, shared namespace
+// and let one caller read another's cached response.
 app.use(`${env.API_PREFIX}/auth`, authController.router);
 app.use(`${env.API_PREFIX}/wallet`, walletController.router);
 app.use(`${env.API_PREFIX}/companies`, payrollController.router);

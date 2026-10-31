@@ -98,8 +98,8 @@ REDIS_URL=redis://localhost:6379
 REDIS_PREFIX=flexpay:
 
 # ── JWT / Authentication ────────────────
-JWT_ACCESS_SECRET=change-me-to-a-random-32-char-secret-key-here
-JWT_REFRESH_SECRET=change-me-to-another-random-32-char-secret-key
+JWT_ACCESS_SECRET=<generate with: openssl rand -hex 48>
+JWT_REFRESH_SECRET=<generate with: openssl rand -hex 48>
 JWT_ACCESS_EXPIRY=15m
 JWT_REFRESH_EXPIRY=7d
 

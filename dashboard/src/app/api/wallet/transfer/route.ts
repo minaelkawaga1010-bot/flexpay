@@ -1,7 +1,34 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { createHash } from 'crypto';
 import { db } from '@/lib/db';
 
 const DEMO_PHONE = '+971501234567';
+
+/**
+ * Universal receipt hash — a deterministic, tamper-evident fingerprint
+ * of a completed transfer. SHA-256 over the canonical, ordered field
+ * set so the same transfer always yields the same hash and any change
+ * to amount / parties / currency changes it. Returned to the client so
+ * the success UI can stream a verifiable receipt id.
+ */
+function universalReceiptHash(input: {
+  transferId: string;
+  senderId: string;
+  receiverId: string;
+  amount: number;
+  currency: string;
+  createdAt: Date;
+}): string {
+  const canonical = [
+    input.transferId,
+    input.senderId,
+    input.receiverId,
+    input.amount.toFixed(2),
+    input.currency,
+    input.createdAt.toISOString(),
+  ].join('|');
+  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -141,11 +168,21 @@ export async function POST(request: NextRequest) {
       return { transfer, senderTx, receiverTx };
     });
 
+    const receiptHash = universalReceiptHash({
+      transferId: result.transfer.id,
+      senderId: sender.id,
+      receiverId: receiver.id,
+      amount,
+      currency: targetCurrency,
+      createdAt: result.transfer.createdAt,
+    });
+
     return NextResponse.json({
       message: 'Transfer successful',
       transfer: result.transfer,
       senderTransaction: result.senderTx,
       receiverTransaction: result.receiverTx,
+      universalReceiptHash: receiptHash,
     });
   } catch (error) {
     console.error('P2P Transfer error:', error);

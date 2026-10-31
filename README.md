@@ -86,6 +86,9 @@ npm install
 
 # 2. Set environment
 cp .env.example .env
+#    JWT secrets have NO default: set JWT_ACCESS_SECRET and JWT_REFRESH_SECRET
+#    in .env to two different values, e.g. each from `openssl rand -hex 48`.
+#    The API refuses to start if either is missing, weak or a known value.
 
 # 3. Spin up Postgres + Redis
 npm run docker:up
@@ -139,7 +142,7 @@ A health check is exposed at `GET /health`. The OpenAPI contract is at
 - **OTP brute-force** — `authRateLimiter` (5/window) keyed on phone, plus `otpRateLimiter` (3/h)
 - **P2P double-spend** — `Idempotency-Key` middleware + Prisma `$transaction` + per-user `transferRateLimiter`
 - **Payroll job failure** — Bull queue with exponential backoff (5 attempts), payroll row records `failureReason`
-- **Webhook spoofing** — HMAC-SHA256 verification on NymCard / MoneyHash with raw-body parsing mounted before `express.json()`
+- **Webhook spoofing** — fail-closed authentication in every environment, raw-body parsing mounted before `express.json()`: NymCard nCore Basic Auth (+ optional header), MoneyHash v3 signatures with a timestamp window, HMAC-SHA256 for FlexxPay / biller; accepted deliveries are single-use (see `src/webhooks/webhook-security.ts`)
 - **Credit-score manipulation** — server-side only, no client input, persisted on `Employee.creditScore`
 - **Remittance FX volatility** — rates cached for 5 min; quote response carries an "estimated amount" disclaimer
 

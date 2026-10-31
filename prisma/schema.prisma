@@ -148,6 +148,15 @@ model Employee {
   fullNameEncrypted     String?             // AES-256-GCM envelope of fullName
   salary                Float?
   salaryEncrypted       String?             // AES-256-GCM envelope of salary
+  // TASK-018.1: additive, nullable envelope/blind-index columns for the
+  // phone and email PII fields, mirroring fullNameEncrypted/salaryEncrypted
+  // and the existing phoneHash. NOT populated by any code yet (dual-write,
+  // backfill, blind-index computation and key management are later,
+  // separately-approved phases). No constraints/defaults so existing rows
+  // and reads are unaffected.
+  phoneEncrypted        String?             // AES-256-GCM envelope of E.164(phone)
+  emailEncrypted        String?             // AES-256-GCM envelope of lower(trim(email))
+  emailHash             String?             // HMAC blind index of lower(trim(email)) — equality lookup (future)
 
   walletBalance         Float               @default(0)
   plan                  PlanType            @default(BASIC)
@@ -208,6 +217,11 @@ model Employee {
   lastLoginAt           DateTime?
 
   @@index([phone])
+  // TASK-018.4B: declare the already-existing phoneHash index (created by the
+  // A.7 migration as "employees_phoneHash_idx") so schema ⇄ migrations ⇄ DB
+  // agree and `migrate dev`/baseline diff report no drift. This only declares
+  // the index; phoneHash's semantics and stored values are unchanged.
+  @@index([phoneHash])
   @@index([companyId])
   @@index([status])
   @@index([referralCode])

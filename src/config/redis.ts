@@ -101,6 +101,20 @@ class RedisService {
     return entry.value;
   }
 
+  /**
+   * Atomic SET-if-absent with TTL. Returns true only when this call
+   * created the key. The in-memory fallback is atomic per process only.
+   */
+  async setIfAbsent(key: string, value: string, ttlSeconds: number): Promise<boolean> {
+    if (this.connected) {
+      const result = await this.client.set(key, value, { NX: true, EX: ttlSeconds });
+      return result === 'OK';
+    }
+    if ((await this.get(key)) !== null) return false;
+    this.memory.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000 });
+    return true;
+  }
+
   async del(key: string): Promise<void> {
     if (this.connected) await this.client.del(key);
     this.memory.delete(key);

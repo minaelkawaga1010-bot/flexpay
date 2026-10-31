@@ -3,6 +3,7 @@ import express from 'express';
 import { z } from 'zod';
 import { authenticate, AuthRequest } from '@shared/middleware/auth';
 import { asyncHandler } from '@shared/utils/asyncHandler';
+import { idempotency } from '@shared/utils/idempotency';
 import { AppError, BadRequest, Forbidden, NotFound } from '@shared/utils/errors';
 import logger from '@shared/utils/logger';
 import { prisma } from '@config/prisma';
@@ -62,6 +63,9 @@ export class PayrollIngestionController {
         type: ['text/plain', 'application/octet-stream', 'text/csv'],
         limit: MAX_FILE_BYTES,
       }),
+      // TASK-013: after authenticate('admin') + raw-body parse, so the record
+      // is scoped to the admin principal and fingerprints the raw SIF bytes.
+      idempotency,
       asyncHandler(this.ingest),
     );
 

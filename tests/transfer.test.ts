@@ -1,6 +1,6 @@
 jest.mock('@config/prisma', () => {
   const tx = {
-    employee: { findFirst: jest.fn(), update: jest.fn() },
+    employee: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     employeeTransaction: { create: jest.fn() },
   };
   return {
@@ -12,6 +12,14 @@ jest.mock('@config/prisma', () => {
     },
   };
 });
+
+// TASK-002: the transfer now acquires a scoped advisory lock. No-op it
+// here (its real pg_advisory_xact_lock behaviour is covered by the
+// Postgres e2e concurrency test), matching the bill-payment unit mocks.
+jest.mock('@shared/utils/advisory-lock', () => ({
+  acquireWorkerLockScoped: jest.fn().mockResolvedValue(undefined),
+  LockScope: { EWA_RESERVATION: 1, EWA_RECOVERY: 2, WALLET_DEBIT: 3, COMPLIANCE_REVIEW: 4 },
+}));
 
 jest.mock('@modules/notifications/notification.job', () => ({
   enqueueNotification: jest.fn().mockResolvedValue(undefined),
@@ -29,7 +37,7 @@ const mocked = prisma as unknown as {
   employeeTransaction: { findUnique: jest.Mock };
   $transaction: jest.Mock;
   __tx: {
-    employee: { findFirst: jest.Mock; update: jest.Mock };
+    employee: { findFirst: jest.Mock; update: jest.Mock; updateMany: jest.Mock };
     employeeTransaction: { create: jest.Mock };
   };
 };
@@ -57,6 +65,8 @@ describe('walletService.transfer', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mocked.employeeTransaction.findUnique.mockResolvedValue(null);
+    // Default happy-path for the guarded debit: one row updated.
+    mocked.__tx.employee.updateMany.mockResolvedValue({ count: 1 });
   });
 
   it('rejects when sender has insufficient balance', async () => {
@@ -71,6 +81,26 @@ describe('walletService.transfer', () => {
         amount: 100,
       }),
     ).rejects.toThrow(/INSUFFICIENT_BALANCE/);
+  });
+
+  it('TASK-002: guarded debit rejects a lost concurrency race (stale read looked sufficient, updateMany matched 0 rows)', async () => {
+    // Snapshot read shows enough balance (passes the fast-path), but by
+    // write time a competing debit drained it → updateMany affects 0 rows.
+    mocked.__tx.employee.findFirst
+      .mockResolvedValueOnce(mockSender({ walletBalance: 1000 }))
+      .mockResolvedValueOnce(mockReceiver());
+    mocked.__tx.employee.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    await expect(
+      walletService.transfer({
+        senderId: 'sender',
+        recipientPhone: '+971500000002',
+        amount: 100,
+      }),
+    ).rejects.toThrow(/INSUFFICIENT_BALANCE/);
+
+    // The guarded update is the gate — the recipient credit must NOT run.
+    expect(mocked.__tx.employee.update).not.toHaveBeenCalled();
   });
 
   it('rejects self-transfers', async () => {

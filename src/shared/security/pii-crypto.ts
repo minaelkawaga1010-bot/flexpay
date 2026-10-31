@@ -93,6 +93,128 @@ export function setKeyProvider(provider: KeyProvider): void {
 }
 
 // ───────────────────────────────────────────────────────────────────
+// AWS KMS key provider — production DEK envelope unwrap
+// ───────────────────────────────────────────────────────────────────
+
+/**
+ * Production key provider. At boot, `initialise()` calls KMS Decrypt on
+ * the wrapped (base64 ciphertext-blob) DEK and caches the plaintext
+ * 32-byte DEK in memory. `getKey()` is synchronous (the KeyProvider
+ * contract) and serves the cached DEK — KMS is touched exactly once,
+ * never on the encrypt/decrypt hot path.
+ *
+ * Fail-closed: if `getKey()` is called before `initialise()` resolves,
+ * it throws rather than returning a zero/garbage key. The boot path
+ * (`initialiseKeyProvider`) awaits `initialise()` and lets any KMS
+ * handshake failure propagate so the process secure-closes instead of
+ * coming online with no usable key.
+ */
+export class AwsKmsKeyProvider implements KeyProvider {
+  private dek: Buffer | null = null;
+
+  constructor(
+    private readonly opts: { region: string; wrappedDekBase64: string; keyId?: string },
+  ) {}
+
+  async initialise(): Promise<void> {
+    // Lazy import so the AWS SDK is only loaded on the production path —
+    // dev/test (MockKeyProvider / EnvKeyProvider) never pay the cost.
+    const { KMSClient, DecryptCommand } = await import('@aws-sdk/client-kms');
+    const client = new KMSClient({ region: this.opts.region });
+    const ciphertextBlob = Buffer.from(this.opts.wrappedDekBase64, 'base64');
+    const result = await client.send(
+      new DecryptCommand({
+        CiphertextBlob: ciphertextBlob,
+        // Pin the key id when supplied — defends against a ciphertext
+        // re-wrapped under an attacker-controlled CMK.
+        ...(this.opts.keyId ? { KeyId: this.opts.keyId } : {}),
+      }),
+    );
+    if (!result.Plaintext) {
+      throw new Error('KMS Decrypt returned no plaintext DEK');
+    }
+    const dek = Buffer.from(result.Plaintext);
+    if (dek.length !== KEY_BYTES) {
+      throw new Error(`KMS-unwrapped DEK must be exactly ${KEY_BYTES} bytes; got ${dek.length}`);
+    }
+    this.dek = dek;
+  }
+
+  getKey(): Buffer {
+    if (!this.dek) {
+      throw new Error('AwsKmsKeyProvider.getKey() before initialise() — DEK not yet unwrapped');
+    }
+    return this.dek;
+  }
+}
+
+/**
+ * Development-only key provider. Returns a deterministic 32-byte key
+ * derived from a fixed seed so local crypto round-trips without any AWS
+ * dependency or env wiring. `initialiseKeyProvider` selects this ONLY
+ * when NODE_ENV === 'development' AND no KMS config is present — it can
+ * never be reached in production.
+ */
+export class MockKeyProvider implements KeyProvider {
+  private readonly dek: Buffer;
+  constructor() {
+    this.dek = createHash('sha256').update('flexpay-dev-mock-dek').digest();
+  }
+  getKey(): Buffer {
+    return this.dek;
+  }
+}
+
+/**
+ * Boot-time key-provider selector. Call once from server startup BEFORE
+ * any request can reach an encrypt/decrypt path.
+ *
+ * Selection order:
+ *   1. KMS configured (AWS_REGION + KMS_WRAPPED_DEK) → AwsKmsKeyProvider.
+ *      A KMS handshake failure THROWS — the caller is expected to let
+ *      the process exit (secure-close) rather than serve with no key.
+ *   2. NODE_ENV === 'development' and KMS absent → MockKeyProvider.
+ *   3. Otherwise (test / prod-without-KMS) → leave the EnvKeyProvider
+ *      default in place. In production with neither KMS nor PII_DATA_KEY,
+ *      the first crypto call fail-closes via MissingKeyError; we ALSO
+ *      throw here so the failure is loud at boot, not lazy at runtime.
+ */
+export async function initialiseKeyProvider(): Promise<void> {
+  const region = env.AWS_REGION;
+  const wrapped = env.KMS_WRAPPED_DEK;
+  const isProd = env.NODE_ENV === 'production';
+
+  if (region && wrapped) {
+    const provider = new AwsKmsKeyProvider({
+      region,
+      wrappedDekBase64: wrapped,
+      keyId: env.KMS_KEY_ID,
+    });
+    await provider.initialise(); // throws on KMS handshake failure → secure-close
+    setKeyProvider(provider);
+    logger.info('PII key provider: AWS KMS DEK unwrapped at boot', { region });
+    return;
+  }
+
+  if (isProd) {
+    // No KMS in production is non-negotiable — refuse to come online.
+    throw new Error(
+      'KMS not configured in production: AWS_REGION + KMS_WRAPPED_DEK are required. Refusing to boot with a non-KMS key provider.',
+    );
+  }
+
+  if (env.NODE_ENV === 'development' && !env.PII_DATA_KEY) {
+    setKeyProvider(new MockKeyProvider());
+    logger.warn('PII key provider: MockKeyProvider (development fallback — NOT for production)');
+    return;
+  }
+
+  // test, or development with an explicit PII_DATA_KEY: keep the
+  // EnvKeyProvider default already in place.
+  logger.info('PII key provider: EnvKeyProvider (PII_DATA_KEY)');
+}
+
+// ───────────────────────────────────────────────────────────────────
 // Field encryption
 // ───────────────────────────────────────────────────────────────────
 

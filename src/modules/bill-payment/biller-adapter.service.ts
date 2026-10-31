@@ -52,12 +52,14 @@ export interface BillerAdapter {
 
 // ───────────────────────────────────────────────────────────────────
 // Default adapter — a deterministic stub. In production this is
-// replaced at boot via setBillerAdapter() with the MoneyHash adapter.
-// The stub is intentionally non-throwing so unit tests that don't care
-// about the wire format still exercise the full service path.
+// replaced at boot via setBillerAdapter() with the MoneyHash adapter;
+// server.ts refuses to start in production while it is still bound
+// (TASK-007), because the stub accepts debited bills without paying
+// any biller. The stub is intentionally non-throwing so unit tests that
+// don't care about the wire format still exercise the full service path.
 // ───────────────────────────────────────────────────────────────────
 
-let activeAdapter: BillerAdapter = {
+const STUB_ADAPTER: BillerAdapter = {
   async submit(input: BillerDispatchInput): Promise<BillerDispatchResult> {
     logger.debug('biller adapter: default stub submit', {
       billerType: input.billerType,
@@ -70,6 +72,8 @@ let activeAdapter: BillerAdapter = {
   },
 };
 
+let activeAdapter: BillerAdapter = STUB_ADAPTER;
+
 /** Replace the active adapter (production boot, or tests). */
 export function setBillerAdapter(adapter: BillerAdapter): void {
   activeAdapter = adapter;
@@ -78,4 +82,9 @@ export function setBillerAdapter(adapter: BillerAdapter): void {
 /** Read-only access for the service layer. */
 export function getBillerAdapter(): BillerAdapter {
   return activeAdapter;
+}
+
+/** True while no real biller rail has been bound. */
+export function isStubBillerAdapter(): boolean {
+  return activeAdapter === STUB_ADAPTER;
 }

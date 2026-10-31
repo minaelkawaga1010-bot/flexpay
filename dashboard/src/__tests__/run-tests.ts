@@ -298,6 +298,8 @@ async function main(): Promise<void> {
   await import("./credit-score.test.ts");
   await import("./transfer.test.ts");
   await import("./ops-intel-client.test.ts");
+  await import("./log-policy.test.ts");
+  await import("./jwt.test.ts");
 
   for (const suite of rootSuites) {
     await runSuite(suite);

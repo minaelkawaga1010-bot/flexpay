@@ -2,12 +2,17 @@ import { Request, Response, Router } from 'express';
 import { Prisma, TransactionStatus, TransactionType } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@config/prisma';
-import { env } from '@config/env';
 import logger from '@shared/utils/logger';
 import { asyncHandler } from '@shared/utils/asyncHandler';
-import { Unauthorized } from '@shared/utils/errors';
-import { nymcardService } from '@modules/cards/nymcard.service';
+import { AppError } from '@shared/utils/errors';
 import { cashbackService } from '@modules/cashback/cashback.service';
+import {
+  assertWebhookAuthenticated,
+  processDeliveryOnce,
+  rawBodyDeliveryKey,
+  verifyNymCardRequest,
+  type WebhookAuthSuccess,
+} from './webhook-security';
 
 /**
  * NymCard webhook — production-grade card-event handler.
@@ -18,11 +23,13 @@ import { cashbackService } from '@modules/cashback/cashback.service';
  *   /shipping-update    — physical-card courier signal
  *   /card-status        — issuer-side status change
  *
- * Security contract:
- *   • Strict HMAC-SHA256 over the raw request body. In production
- *     (NYMCARD_WEBHOOK_SECRET set), an absent or mismatched signature
- *     is a hard 401. In dev/test (secret unset) we passthrough so
- *     local tooling can hit the route — never enable that in prod.
+ * Security contract (TASK-007):
+ *   • NymCard (nCore) authenticates webhooks with Basic Auth plus an
+ *     optional custom header — its documented protocol; there is no
+ *     body signature. Wrong credentials are a hard 401 and missing or
+ *     weak configuration a 503, in EVERY environment (no bypass).
+ *   • /transaction deliveries are single-use by raw-body hash, on top of
+ *     the per-event idempotency key below.
  *
  * Atomicity contract:
  *   • Every event that has a financial effect is processed inside a
@@ -130,17 +137,32 @@ export class NymCardCardWebhook {
   }
 
   // ────────────────────────────────────────────────────────────────
-  // Signature verification — strict HMAC-SHA256
+  // Authentication — nCore Basic Auth (+ optional header), fail closed
   // ────────────────────────────────────────────────────────────────
 
-  private verifySignature(req: Request): boolean {
-    const sig = req.header(env.WEBHOOK_SIGNATURE_HEADER) ?? undefined;
-    return nymcardService.verifyWebhookSignature(req.body as Buffer, sig);
+  private authenticate(req: Request): WebhookAuthSuccess {
+    const auth = verifyNymCardRequest(req);
+    assertWebhookAuthenticated(auth, 'nymcard');
+    return auth;
   }
 
   private parseJsonBody<T>(req: Request, schema: z.ZodType<T>): T {
-    const raw = JSON.parse((req.body as Buffer).toString('utf8'));
-    return schema.parse(raw);
+    // Malformed input is a 400 with field paths logged only — the raw
+    // SyntaxError / ZodError messages can echo payload values.
+    let raw: unknown;
+    try {
+      raw = JSON.parse((req.body as Buffer).toString('utf8'));
+    } catch {
+      throw new AppError(400, 'INVALID_JSON', 'Body is not valid JSON');
+    }
+    const result = schema.safeParse(raw);
+    if (!result.success) {
+      logger.warn('NymCard webhook: payload validation failed', {
+        fields: result.error.issues.map((issue) => issue.path.join('.')),
+      });
+      throw new AppError(400, 'INVALID_PAYLOAD', 'Payload failed validation');
+    }
+    return result.data;
   }
 
   // ────────────────────────────────────────────────────────────────
@@ -148,25 +170,27 @@ export class NymCardCardWebhook {
   // ────────────────────────────────────────────────────────────────
 
   private handleTransaction = async (req: Request, res: Response): Promise<void> => {
-    if (!this.verifySignature(req)) throw Unauthorized('INVALID_SIGNATURE');
+    const auth = this.authenticate(req);
     const payload = this.parseJsonBody(req, txnPayloadSchema);
 
-    // Authorization events are pre-settlement holds. We do NOT touch
-    // the ledger on AUTHORIZED — the cash hasn't moved yet, and the
-    // issuer can void the auth on a partial / declined clearing. We
-    // ACK so NymCard stops retrying.
-    if (payload.type === 'transaction.authorized') {
-      logger.info('NymCard authorization received (no ledger effect)', {
-        externalId: payload.data.id,
-        cardId: payload.data.cardId,
-        amount: payload.data.amount,
-      });
-      res.status(200).json({ received: true });
-      return;
-    }
+    const delivery = { key: rawBodyDeliveryKey('nymcard:transaction', req.body), ttlSeconds: auth.deliveryTtlSeconds };
+    await processDeliveryOnce(res, 'nymcard', delivery, async () => {
+      // Authorization events are pre-settlement holds. We do NOT touch
+      // the ledger on AUTHORIZED — the cash hasn't moved yet, and the
+      // issuer can void the auth on a partial / declined clearing. We
+      // ACK so NymCard stops retrying.
+      if (payload.type === 'transaction.authorized') {
+        logger.info('NymCard authorization received (no ledger effect)', {
+          externalId: payload.data.id,
+          cardId: payload.data.cardId,
+        });
+        res.status(200).json({ received: true });
+        return;
+      }
 
-    await this.processTransaction(payload);
-    res.status(200).json({ received: true });
+      await this.processTransaction(payload);
+      res.status(200).json({ received: true });
+    });
   };
 
   private async processTransaction(payload: TxnPayload): Promise<void> {
@@ -226,18 +250,10 @@ export class NymCardCardWebhook {
     // Limit warning (informational — NymCard enforces hard limits at
     // auth time; this surfaces post-fact drift / config mismatch).
     if (nextSpentToday > card.dailyLimit) {
-      logger.warn('NymCard txn pushed card over modelled daily limit', {
-        cardId,
-        spentToday: nextSpentToday,
-        dailyLimit: card.dailyLimit,
-      });
+      logger.warn('NymCard txn pushed card over modelled daily limit', { cardId });
     }
     if (nextSpentThisMonth > card.monthlyLimit) {
-      logger.warn('NymCard txn pushed card over modelled monthly limit', {
-        cardId,
-        spentThisMonth: nextSpentThisMonth,
-        monthlyLimit: card.monthlyLimit,
-      });
+      logger.warn('NymCard txn pushed card over modelled monthly limit', { cardId });
     }
 
     await prisma.$transaction(
@@ -332,9 +348,6 @@ export class NymCardCardWebhook {
       eventType: type,
       employeeId: employee.id,
       cardId: card.id,
-      signedAmount,
-      interchangeAED: interchange,
-      merchant: data.merchantName,
     });
   }
 
@@ -343,7 +356,7 @@ export class NymCardCardWebhook {
   // ────────────────────────────────────────────────────────────────
 
   private handleShippingUpdate = async (req: Request, res: Response): Promise<void> => {
-    if (!this.verifySignature(req)) throw Unauthorized('INVALID_SIGNATURE');
+    this.authenticate(req);
     const { cardId, trackingNumber, status } = this.parseJsonBody(req, shippingPayloadSchema);
     const card = await prisma.card.findUnique({ where: { cardId } });
     if (!card) {
@@ -362,7 +375,7 @@ export class NymCardCardWebhook {
   // ────────────────────────────────────────────────────────────────
 
   private handleCardStatus = async (req: Request, res: Response): Promise<void> => {
-    if (!this.verifySignature(req)) throw Unauthorized('INVALID_SIGNATURE');
+    this.authenticate(req);
     const { cardId, status } = this.parseJsonBody(req, cardStatusPayloadSchema);
     const card = await prisma.card.findUnique({ where: { cardId } });
     if (!card) {

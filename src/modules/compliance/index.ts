@@ -22,10 +22,16 @@ export {
   screenIdentityAgainstSanctions,
   rescreenActiveEmployees,
   registerComplianceCrons,
+  isSanctionsClear,
+  isSanctionsMatch,
+  classifyNameForScreening,
+  SANCTIONS_MAX_AGE_MS,
+  REQUIRED_SANCTIONS_SOURCES,
 } from './sanctions.service';
 export type {
   RawSanctionsEntry,
   SanctionsListFeed,
   ScreeningInput,
   ScreeningResult,
+  ScreeningStatus,
 } from './sanctions.service';

@@ -4,6 +4,7 @@ import { authenticate, AuthRequest } from '@shared/middleware/auth';
 import { transferRateLimiter } from '@shared/middleware/rate-limit';
 import { validate } from '@shared/middleware/validator';
 import { asyncHandler } from '@shared/utils/asyncHandler';
+import { idempotency } from '@shared/utils/idempotency';
 import { walletService } from './wallet.service';
 import { transactionsQuerySchema, transferSchema } from './wallet.dto';
 
@@ -21,6 +22,9 @@ export class WalletController {
     this.router.post(
       '/transfer',
       transferRateLimiter,
+      // TASK-013: after authenticate() (router.use above), so the record is
+      // scoped to this employee — never a shared pre-auth namespace.
+      idempotency,
       validate(transferSchema),
       asyncHandler(this.transfer),
     );
@@ -44,11 +48,17 @@ export class WalletController {
   };
 
   private transfer = async (req: AuthRequest, res: Response): Promise<void> => {
+    // TASK-013: the service-level (DB-unique) idempotency key must be scoped
+    // to the authenticated sender, or two users sending the same raw
+    // Idempotency-Key would collide and one would replay the other's
+    // transaction. Namespacing here (wiring only) keeps wallet.service and
+    // the schema untouched, consistent with remittance/advance scoping.
+    const rawKey = req.header('idempotency-key');
     const result = await walletService.transfer({
       senderId: req.user!.id,
       recipientPhone: req.body.recipientPhone,
       amount: req.body.amount,
-      idempotencyKey: req.header('idempotency-key') ?? undefined,
+      idempotencyKey: rawKey ? `wallet:transfer:${req.user!.id}:${rawKey}` : undefined,
     });
     res.json(result);
   };

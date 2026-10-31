@@ -1,5 +1,4 @@
 import { randomUUID } from 'crypto';
-import crypto from 'crypto';
 import axios, { AxiosError, AxiosInstance } from 'axios';
 import { env } from '@config/env';
 import logger from '@shared/utils/logger';
@@ -59,7 +58,9 @@ export class NymCardService {
 
   async createCustomer(input: { name: string; email: string; phone: string }): Promise<NymCardCustomer> {
     if (!this.isConfigured) {
-      logger.info('[nymcard:stub] createCustomer', input);
+      // TASK-017: `input` holds name / email / phone — direct identifiers.
+      // Log only that the stub ran; never the customer PII.
+      logger.info('[nymcard:stub] createCustomer (PII redacted)');
       return { id: `cust_${randomUUID()}`, ...input };
     }
     return this.withRetry(async () => {
@@ -189,24 +190,6 @@ export class NymCardService {
       const { data } = await this.client.get(`/cards/${cardId}/sensitive`);
       return { pan: data.pan, cvv: data.cvv };
     });
-  }
-
-  // ----------------------------------------------------- Webhook signature
-
-  verifyWebhookSignature(rawBody: Buffer, signatureHeader: string | undefined): boolean {
-    if (!env.NYMCARD_WEBHOOK_SECRET) return true;
-    if (!signatureHeader) return false;
-    const [scheme, sig] = signatureHeader.split('=');
-    if (scheme !== 'sha256' || !sig) return false;
-    const expected = crypto
-      .createHmac('sha256', env.NYMCARD_WEBHOOK_SECRET)
-      .update(rawBody)
-      .digest('hex');
-    try {
-      return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
-    } catch {
-      return false;
-    }
   }
 
   // --------------------------------------------------------------- Helpers

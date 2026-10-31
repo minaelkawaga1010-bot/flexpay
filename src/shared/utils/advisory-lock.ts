@@ -27,12 +27,13 @@ import logger from './logger';
  *     // ... write ledger entries ...
  *   });
  *
- * IMPORTANT: the lock is per-transaction. Calling acquireWorkerLock
- * outside a $transaction (i.e. on the global prisma client) makes the
- * lock session-level and it will NOT release on the next operation,
- * potentially blocking subsequent reservations indefinitely. We guard
- * by requiring the `TransactionClient` type — the global Prisma client
- * type is not assignable here.
+ * IMPORTANT: the lock is per-transaction and must be taken on the `tx`
+ * of the operation it protects. On the global prisma client the
+ * statement runs as its own autocommit transaction on an arbitrary
+ * pooled connection, so the lock is released the moment it is granted
+ * and serializes nothing. The `TransactionClient` parameter type does
+ * not prevent that (the global client is structurally assignable), so
+ * the helpers check at runtime and throw instead.
  */
 
 /**
@@ -56,15 +57,34 @@ export function workerLockKey(workerId: string): number {
 }
 
 /**
+ * Fail closed unless `tx` is an interactive-transaction client. Those
+ * clients do not expose `$transaction`; the global client does.
+ */
+function assertInteractiveTransaction(tx: Prisma.TransactionClient): void {
+  if (typeof (tx as { $transaction?: unknown }).$transaction === 'function') {
+    throw new Error('Advisory locks must be acquired inside prisma.$transaction(async (tx) => ...)');
+  }
+}
+
+/**
  * Acquire the per-worker advisory lock inside the given transaction.
  * Held until the transaction commits or rolls back.
+ *
+ * pg_advisory_xact_lock returns `void`, which Prisma cannot deserialize
+ * from $queryRaw ("Failed to deserialize column of type 'void'") — that
+ * error rolled back every locked transaction (TASK-008). The `::text`
+ * cast yields one deserializable row and changes nothing else: the
+ * VOLATILE call still runs on `tx`'s connection inside its transaction
+ * and blocks until granted. Any failure (lock_timeout, transaction
+ * timeout, lost connection) propagates — nothing continues unlocked.
  */
 export async function acquireWorkerLock(
   tx: Prisma.TransactionClient,
   workerId: string,
 ): Promise<void> {
+  assertInteractiveTransaction(tx);
   const key = workerLockKey(workerId);
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(${key}::bigint)`;
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(${key}::bigint)::text AS locked`;
   logger.debug('worker advisory lock acquired', { workerId, key });
 }
 
@@ -93,9 +113,11 @@ export async function acquireWorkerLockScoped(
   workerId: string,
   scope: LockScope,
 ): Promise<void> {
+  assertInteractiveTransaction(tx);
   const key = workerLockKey(workerId);
-  // The two-int form: pg_advisory_xact_lock(key1, key2)
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(${key}::int4, ${scope}::int4)`;
+  // The two-int form: pg_advisory_xact_lock(key1, key2), with the same
+  // void-safe cast as acquireWorkerLock.
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(${key}::int4, ${scope}::int4)::text AS locked`;
   logger.debug('worker advisory lock acquired (scoped)', { workerId, key, scope });
 }
 
