@@ -169,6 +169,26 @@ that still lacks the index. In the supported bootstrap paths it never is.
   introduce no destructive DDL (all `IF NOT EXISTS` / additive).
 - For DR rebuild of a fresh instance, use Class A.
 
+## 10a. CI lifecycle runner isolation (TASK-018.4B-I6)
+
+`scripts/migration-lifecycle-check.sh` can CREATE/DROP databases, so it refuses
+to run unless it has POSITIVE proof the target is a dedicated, disposable test
+instance, and it only ever drops databases it created **this run** (a unique
+`flexpay_migtest_<run-id>_*` prefix, guarded on every drop). There is **no
+wildcard cleanup** (the old `prisma_migrate_shadow%` sweep is removed; the runner
+uses its own owned, explicitly-named shadow database). Fail-closed gate, all
+required before any CREATE/DROP:
+
+- `MIGRATION_TEST_DISPOSABLE=1` (explicit assertion),
+- a provisioning sentinel database `flexpay_migtest_sentinel` that exists **only**
+  on instances deliberately provisioned for these tests,
+- the application `DATABASE_URL` must be **unset** (no app-credential reuse); the
+  runner uses dedicated `PG*` connection variables.
+
+Never create the sentinel on a production, staging, shared, or persistent
+instance. `scripts/migration-lifecycle-safety-test.sh` proves the runner fails
+closed without this evidence and never drops a database it does not own.
+
 ## 11. Explicit remaining release blockers
 
 1. Real production / staging / DR migration state is **NOT VERIFIED** — run the
