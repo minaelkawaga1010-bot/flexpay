@@ -217,6 +217,11 @@ model Employee {
   lastLoginAt           DateTime?
 
   @@index([phone])
+  // TASK-018.4B: declare the already-existing phoneHash index (created by the
+  // A.7 migration as "employees_phoneHash_idx") so schema ⇄ migrations ⇄ DB
+  // agree and `migrate dev`/baseline diff report no drift. This only declares
+  // the index; phoneHash's semantics and stored values are unchanged.
+  @@index([phoneHash])
   @@index([companyId])
   @@index([status])
   @@index([referralCode])
