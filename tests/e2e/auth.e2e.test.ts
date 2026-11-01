@@ -3,6 +3,7 @@ import { app } from '@/app';
 import { prisma } from '@config/prisma';
 import redisService from '@config/redis';
 import { closeAllQueues } from '@config/bull';
+import { verifyAccessToken } from '@shared/utils/jwt';
 
 const TEST_PHONE = '+971509999001';
 const SECOND_PHONE = '+971509999002';
@@ -135,7 +136,19 @@ describe('Auth — E2E', () => {
       .send({})
       .expect(200);
 
+    // The refresh security contract is NOT "every access token is byte-unique":
+    // access tokens are deliberately jti-less (src/shared/utils/jwt.ts), so two
+    // minted for the same principal within the same second are byte-identical —
+    // asserting inequality was an incorrect timing assumption, not a security
+    // property. What /refresh must actually guarantee:
+    //   (1) it returns a cryptographically VALID access token (signature, issuer,
+    //       audience, tokenUse='access', not expired) scoped to the SAME principal;
+    //   (2) it ROTATES the refresh token, which DOES carry a unique jti.
     expect(refreshRes.body.accessToken).toMatch(/^eyJ/);
-    expect(refreshRes.body.accessToken).not.toBe(verifyRes.body.accessToken);
+    const refreshed = verifyAccessToken(refreshRes.body.accessToken); // throws unless valid
+    expect(refreshed.userId).toBe(verifyRes.body.user.id);
+    expect(refreshed.role).toBe('employee');
+    expect(refreshRes.body.refreshToken).toMatch(/^eyJ/);
+    expect(refreshRes.body.refreshToken).not.toBe(verifyRes.body.refreshToken);
   });
 });
