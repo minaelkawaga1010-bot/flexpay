@@ -11,6 +11,13 @@ jest.mock('@config/prisma', () => ({
   prisma: {
     employee: { findFirst: jest.fn(), findUnique: jest.fn() },
     company: { findFirst: jest.fn(), findUnique: jest.fn() },
+    // TASK-AUTH-R2: refresh is now stateful; the rotation path reads the
+    // session store. Stateful behaviour is proven against real PostgreSQL in
+    // tests/e2e/auth-refresh-session.e2e.test.ts — here we only assert the
+    // crypto-level + untracked-token rejections that need no DB.
+    refreshSession: { findUnique: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
+    auditLog: { create: jest.fn() },
+    $transaction: jest.fn(),
   },
 }));
 jest.mock('@config/redis', () => ({ __esModule: true, default: {} }));
@@ -39,6 +46,7 @@ import { authService } from '@modules/auth/auth.service';
 const mockedPrisma = prisma as unknown as {
   employee: { findFirst: jest.Mock; findUnique: jest.Mock };
   company: { findFirst: jest.Mock; findUnique: jest.Mock };
+  refreshSession: { findUnique: jest.Mock; updateMany: jest.Mock; create: jest.Mock };
 };
 
 // ───────────────────────────────────────────────────────────────────
@@ -523,30 +531,17 @@ describe('refreshTokens — refresh-token handling', () => {
     expect(mockedPrisma.company.findUnique).not.toHaveBeenCalled();
   });
 
-  it('refuses blocked employees and suspended companies, like login does', async () => {
-    mockedPrisma.employee.findUnique.mockResolvedValueOnce({ id: 'emp-1', status: 'BLOCKED' });
+  // TASK-AUTH-R2: stateful single-use rotation makes refresh DB-backed. A
+  // syntactically valid refresh token with NO persisted RefreshSession must be
+  // rejected outright (no compatibility fallback that mints a new session).
+  // Blocked/suspended refusal, fresh-pair issuance, single-use rotation, replay
+  // + family revocation, logout and concurrency are proven against real
+  // PostgreSQL in tests/e2e/auth-refresh-session.e2e.test.ts.
+  it('refuses an untracked (session-less) refresh token even with a valid signature', async () => {
+    mockedPrisma.refreshSession.findUnique.mockResolvedValueOnce(null);
     await expect(
       authService.refreshTokens(generateRefreshToken({ userId: 'emp-1', role: 'employee' })),
-    ).rejects.toMatchObject({ status: 403, message: 'ACCOUNT_BLOCKED' });
-
-    mockedPrisma.company.findUnique.mockResolvedValueOnce({ id: 'co-1', status: 'SUSPENDED' });
-    await expect(
-      authService.refreshTokens(generateRefreshToken({ userId: 'co-1', role: 'company', companyId: 'co-1' })),
-    ).rejects.toMatchObject({ status: 403, message: 'ACCOUNT_SUSPENDED' });
-
-    mockedPrisma.employee.findUnique.mockResolvedValueOnce(null);
-    await expect(
-      authService.refreshTokens(generateRefreshToken({ userId: 'ghost', role: 'employee' })),
-    ).rejects.toMatchObject({ status: 401, message: 'USER_NOT_FOUND' });
-  });
-
-  it('issues a fresh, verifiable pair for an active employee', async () => {
-    mockedPrisma.employee.findUnique.mockResolvedValueOnce({ id: 'emp-1', status: 'ACTIVE' });
-    const pair = await authService.refreshTokens(
-      generateRefreshToken({ userId: 'emp-1', role: 'employee', companyId: 'co-1' }),
-    );
-    expect(verifyAccessToken(pair.accessToken)).toEqual({ userId: 'emp-1', role: 'employee', companyId: 'co-1' });
-    expect(verifyRefreshToken(pair.refreshToken).userId).toBe('emp-1');
+    ).rejects.toMatchObject({ status: 401 });
   });
 });
 

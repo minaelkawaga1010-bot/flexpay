@@ -125,6 +125,12 @@ export class AuthController {
   };
 
   private logout = async (req: Request, res: Response): Promise<void> => {
+    const token =
+      (req.body as { refreshToken?: string } | undefined)?.refreshToken ??
+      (req.cookies as { refreshToken?: string } | undefined)?.refreshToken;
+    // Best-effort server-side revocation of THIS device's session family
+    // (TASK-AUTH-R2). Idempotent — never blocks logout on a missing/invalid token.
+    await authService.revokeRefreshSession(token);
     res.clearCookie('refreshToken', { ...REFRESH_COOKIE_OPTIONS, maxAge: undefined });
     logger.info('User logged out', { ip: req.ip });
     void env;

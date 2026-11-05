@@ -952,3 +952,46 @@ model BillPayment {
   @@index([externalRef])
   @@map("bill_payments")
 }
+
+// =====================================================================
+// AUTH — stateful refresh-token sessions (TASK-AUTH-R2)
+// =====================================================================
+// Server-side, PostgreSQL-authoritative refresh-session state enabling
+// single-use rotation, replay/reuse detection, token-family revocation, and
+// logout / all-session revocation. Only a SHA-256 HASH of the refresh JWT's
+// high-entropy `jti` is stored — never a raw refresh token. Deliberately no
+// FK/relation to Employee/Company (subject kept generic + separated by
+// subjectType), so the migration is purely additive (no change to any
+// existing table).
+
+enum RefreshSubjectType {
+  EMPLOYEE
+  COMPANY
+}
+
+model RefreshSession {
+  id                String             @id @default(cuid())
+  /// Token-family id: every token rotated from one login shares it; reuse
+  /// detection revokes the whole family.
+  familyId          String
+  /// SHA-256 hex of the refresh JWT `jti`. Unique — never the raw token.
+  jtiHash           String             @unique
+  subjectId         String
+  subjectType       RefreshSubjectType
+  createdAt         DateTime           @default(now())
+  /// Per-token expiry (mirrors the refresh JWT `exp`).
+  expiresAt         DateTime
+  /// Absolute family lifetime cap — rotation can never extend a session past it.
+  familyExpiresAt   DateTime
+  /// Set when this token is spent by a successful rotation (single-use).
+  consumedAt        DateTime?
+  /// jtiHash of the replacement token (lineage; audit only).
+  replacedByJtiHash String?
+  revokedAt         DateTime?
+  revokedReason     String?
+
+  @@index([familyId])
+  @@index([subjectType, subjectId])
+  @@index([expiresAt])
+  @@map("refresh_sessions")
+}
