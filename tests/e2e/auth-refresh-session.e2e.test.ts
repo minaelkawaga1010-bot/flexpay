@@ -211,9 +211,13 @@ describe('AUTH-R2 — stateful refresh sessions', () => {
 
   it('fails CLOSED when the session store is unavailable (no token issued)', async () => {
     const { refreshToken: R1 } = await loginEmployee(PH.failClosed);
+    // TASK-AUTH-R5: rotation now runs inside prisma.$transaction (per-subject
+    // advisory lock), so simulate the authoritative store being unavailable by
+    // failing the transaction itself — the spy on the top-level client's
+    // findUnique would not intercept the in-transaction (tx.) read.
     const spy = jest
-      .spyOn(prisma.refreshSession, 'findUnique')
-      .mockRejectedValueOnce(new Error('simulated store outage'));
+      .spyOn(prisma, '$transaction')
+      .mockRejectedValueOnce(new Error('simulated store outage') as never);
     const res = await refreshReq(R1);
     expect(res.status).not.toBe(200); // fail-closed (500) — never mints tokens
     expect(res.body.accessToken).toBeUndefined();
