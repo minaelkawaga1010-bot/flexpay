@@ -7,19 +7,26 @@
  * left in the repository. Secrets here are generated per run; no known
  * value is reproduced.
  */
-jest.mock('@config/prisma', () => ({
-  prisma: {
+jest.mock('@config/prisma', () => {
+  // TASK-AUTH-R2/R5: refresh is stateful and the rotation path runs inside a
+  // $transaction that takes a per-subject advisory lock. Full stateful/concurrency
+  // behaviour is proven against real PostgreSQL (tests/e2e/auth-refresh-session
+  // and auth-refresh-revocation-race). Here we only assert the crypto-level +
+  // untracked-token rejections that need no DB, so the mocked $transaction simply
+  // runs the callback with the mocked client and the advisory-lock query is a no-op.
+  const p: Record<string, unknown> = {
     employee: { findFirst: jest.fn(), findUnique: jest.fn() },
     company: { findFirst: jest.fn(), findUnique: jest.fn() },
-    // TASK-AUTH-R2: refresh is now stateful; the rotation path reads the
-    // session store. Stateful behaviour is proven against real PostgreSQL in
-    // tests/e2e/auth-refresh-session.e2e.test.ts — here we only assert the
-    // crypto-level + untracked-token rejections that need no DB.
     refreshSession: { findUnique: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
     auditLog: { create: jest.fn() },
-    $transaction: jest.fn(),
-  },
-}));
+    $queryRaw: jest.fn(),
+    $executeRaw: jest.fn(),
+  };
+  p.$transaction = jest.fn((arg: unknown) =>
+    typeof arg === 'function' ? (arg as (tx: unknown) => unknown)(p) : Promise.all(arg as unknown[]),
+  );
+  return { prisma: p };
+});
 jest.mock('@config/redis', () => ({ __esModule: true, default: {} }));
 
 import fs from 'fs';
