@@ -81,14 +81,18 @@ DATABASE_URL="$(url ${PFX}_fresh)" "$PRISMA" migrate diff \
 echo "✅ schema parity (no drift)"
 
 # 3) Object inventory.
+# 22 tables = 21 historical + refresh_sessions (TASK-AUTH-R2, additive).
 T=$(dbq "${PFX}_fresh" "select count(*) from information_schema.tables where table_schema='public' and table_name<>'_prisma_migrations';")
-[ "$T" = "21" ] || fail "expected 21 tables, got $T"
-for idx in employees_phoneHash_idx advances_status_requestedAt_idx payroll_cycles_status_periodEnd_idx; do
+[ "$T" = "22" ] || fail "expected 22 tables, got $T"
+for idx in employees_phoneHash_idx advances_status_requestedAt_idx payroll_cycles_status_periodEnd_idx refresh_sessions_jtiHash_key; do
   [ "$(dbq "${PFX}_fresh" "select count(*) from pg_indexes where indexname='$idx';")" = "1" ] || fail "missing index $idx"
 done
+# TASK-AUTH-R2 refresh-session store must be present (single-use rotation state).
+[ "$(dbq "${PFX}_fresh" "select count(*) from information_schema.tables where table_name='refresh_sessions';")" = "1" ] \
+  || fail "refresh_sessions table missing"
 P=$(dbq "${PFX}_fresh" "select count(*) from information_schema.columns where table_name='employees' and column_name in ('phoneEncrypted','emailEncrypted','emailHash');")
 [ "$P" = "3" ] || fail "expected 3 TASK-018.1 PII columns, got $P"
-echo "✅ object inventory (21 tables, phoneHash+perf indexes, PII columns)"
+echo "✅ object inventory (22 tables incl refresh_sessions, phoneHash+perf+jtiHash indexes, PII columns)"
 
 # 4) migrate dev + shadow replay against an OWNED shadow DB.
 newdb "${PFX}_dev"; newdb "${PFX}_shadow"

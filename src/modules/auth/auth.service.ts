@@ -3,13 +3,8 @@ import { Prisma, EmployeeStatus, PlanType, CompanyStatus } from '@prisma/client'
 import { prisma } from '@config/prisma';
 import redisService from '@config/redis';
 import { env } from '@config/env';
-import {
-  generateAccessToken,
-  generateTokens,
-  JWTPayload,
-  TokenPair,
-  verifyRefreshToken,
-} from '@shared/utils/jwt';
+import { generateAccessToken, JWTPayload, TokenPair } from '@shared/utils/jwt';
+import { refreshSessionService } from './refresh-session.service';
 import { generateOTP } from '@shared/utils/otp';
 import { generateReferralCode } from '@shared/utils/referralCode';
 import { AppError, Conflict, Unauthorized, Forbidden } from '@shared/utils/errors';
@@ -79,7 +74,7 @@ export class AuthService {
       role: 'employee',
       companyId: employee.companyId ?? undefined,
     };
-    const tokens = generateTokens(payload);
+    const tokens = await refreshSessionService.issue(payload);
 
     return {
       accessToken: tokens.accessToken,
@@ -234,7 +229,7 @@ export class AuthService {
       },
     });
 
-    const tokens = generateTokens({
+    const tokens = await refreshSessionService.issue({
       userId: company.id,
       role: 'company',
       companyId: company.id,
@@ -270,7 +265,7 @@ export class AuthService {
     const ok = await bcrypt.compare(password, company.passwordHash);
     if (!ok) throw Unauthorized('INVALID_CREDENTIALS');
 
-    const tokens = generateTokens({
+    const tokens = await refreshSessionService.issue({
       userId: company.id,
       role: 'company',
       companyId: company.id,
@@ -300,34 +295,16 @@ export class AuthService {
   // ------------------------------------------------------- Token refresh
 
   async refreshTokens(refreshToken: string): Promise<TokenPair> {
-    let payload: JWTPayload;
-    try {
-      payload = verifyRefreshToken(refreshToken);
-    } catch {
-      throw Unauthorized('INVALID_REFRESH_TOKEN');
-    }
+    // Stateful single-use rotation with replay/reuse detection and server-side
+    // revocation (TASK-AUTH-R2). Cryptographic verification, admin refusal, and
+    // the blocked/suspended gates are enforced inside the session store, which
+    // is the authoritative revocation state and FAILS CLOSED if the DB is down.
+    return refreshSessionService.rotate(refreshToken);
+  }
 
-    // There is no admin login, so there is no legitimate admin token to
-    // refresh — an admin-role refresh token is refused outright.
-    if (payload.role === 'admin') throw Unauthorized('INVALID_REFRESH_TOKEN');
-
-    // Same gates as login: a blocked employee or a suspended company
-    // cannot mint fresh tokens from an older refresh token.
-    if (payload.role === 'employee') {
-      const employee = await prisma.employee.findUnique({ where: { id: payload.userId } });
-      if (!employee) throw Unauthorized('USER_NOT_FOUND');
-      if (employee.status === EmployeeStatus.BLOCKED) throw Forbidden('ACCOUNT_BLOCKED');
-    } else {
-      const company = await prisma.company.findUnique({ where: { id: payload.userId } });
-      if (!company) throw Unauthorized('USER_NOT_FOUND');
-      if (company.status !== CompanyStatus.ACTIVE) throw Forbidden('ACCOUNT_SUSPENDED');
-    }
-
-    return generateTokens({
-      userId: payload.userId,
-      role: payload.role,
-      companyId: payload.role === 'company' ? payload.userId : payload.companyId,
-    });
+  /** Server-side logout: revoke the presented token's session family (idempotent). */
+  async revokeRefreshSession(refreshToken?: string): Promise<void> {
+    await refreshSessionService.revokeByToken(refreshToken);
   }
 
   // ----------------------------------------------------------- Internals

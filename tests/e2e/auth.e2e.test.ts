@@ -26,6 +26,7 @@ async function clearTestState(phone: string) {
   await prisma.card.deleteMany({ where: { employeeId: employee.id } });
   await prisma.savingsGoal.deleteMany({ where: { employeeId: employee.id } });
   await prisma.loan.deleteMany({ where: { employeeId: employee.id } });
+  await prisma.refreshSession.deleteMany({ where: { subjectId: employee.id } });
   await prisma.employee.delete({ where: { id: employee.id } });
   await redisService.del(`otp:${phone}`);
   await redisService.del(`rate:auth:otp:${phone}`);
@@ -150,5 +151,14 @@ describe('Auth — E2E', () => {
     expect(refreshed.role).toBe('employee');
     expect(refreshRes.body.refreshToken).toMatch(/^eyJ/);
     expect(refreshRes.body.refreshToken).not.toBe(verifyRes.body.refreshToken);
+
+    // TASK-AUTH-R2: rotation is single-use. Re-presenting the ORIGINAL refresh
+    // cookie must now be REJECTED (replay detection) — not merely be a
+    // byte-distinct value from the rotated one.
+    await request(app)
+      .post('/api/v1/auth/refresh')
+      .set('Cookie', refreshCookie!)
+      .send({})
+      .expect(401);
   });
 });

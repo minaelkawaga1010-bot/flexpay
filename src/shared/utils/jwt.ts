@@ -37,6 +37,9 @@ const verifiedClaimsSchema = z.object({
   role: z.enum(['employee', 'company', 'admin']),
   companyId: z.string().min(1).optional(),
   tokenUse: z.enum(['access', 'refresh']),
+  // Refresh tokens carry a unique jti (bound server-side to a RefreshSession).
+  // Access tokens have none; keep it optional so access parsing is unchanged.
+  jti: z.string().min(1).optional(),
   iat: z.number(),
   exp: z.number(),
 });
@@ -64,18 +67,28 @@ export function generateAccessToken(payload: JWTPayload): string {
   return jwt.sign(claimsFor(payload, 'access'), env.JWT_ACCESS_SECRET, options);
 }
 
-export function generateRefreshToken(payload: JWTPayload): string {
+/**
+ * Sign a refresh token. The caller may pass an explicit high-entropy `jti`
+ * so it can persist only its hash as server-side session state (TASK-AUTH-R2);
+ * when omitted a random one is used. Algorithm/issuer/audience/expiry and the
+ * `tokenUse='refresh'` claim are unchanged.
+ */
+export function generateRefreshToken(payload: JWTPayload, jti: string = randomUUID()): string {
   const options: SignOptions = {
     algorithm: JWT_ALGORITHM,
     expiresIn: jwtTtlSeconds.refresh,
     issuer,
     audience,
-    jwtid: randomUUID(),
+    jwtid: jti,
   };
   return jwt.sign(claimsFor(payload, 'refresh'), env.JWT_REFRESH_SECRET, options);
 }
 
-function verifyWith(token: string, secret: string, expectedUse: TokenUse): JWTPayload {
+function verifyWith(
+  token: string,
+  secret: string,
+  expectedUse: TokenUse,
+): JWTPayload & { jti?: string } {
   const decoded = jwt.verify(token, secret, {
     algorithms: [JWT_ALGORITHM],
     issuer,
@@ -85,22 +98,36 @@ function verifyWith(token: string, secret: string, expectedUse: TokenUse): JWTPa
   if (!claims.success || claims.data.tokenUse !== expectedUse) {
     throw new Error('JWT_CLAIMS_REJECTED');
   }
-  const { userId, role, companyId } = claims.data;
-  return companyId ? { userId, role, companyId } : { userId, role };
+  const { userId, role, companyId, jti } = claims.data;
+  const base: JWTPayload & { jti?: string } = companyId
+    ? { userId, role, companyId }
+    : { userId, role };
+  // Only attach jti when present so access-token payloads stay exactly
+  // { userId, role, companyId? } (no stray key).
+  if (jti) base.jti = jti;
+  return base;
 }
 
 export function verifyAccessToken(token: string): JWTPayload {
   try {
-    return verifyWith(token, env.JWT_ACCESS_SECRET, 'access');
+    // Strip any jti: access tokens are { userId, role, companyId? } only.
+    const { userId, role, companyId } = verifyWith(token, env.JWT_ACCESS_SECRET, 'access');
+    return companyId ? { userId, role, companyId } : { userId, role };
   } catch (error) {
     if (error instanceof jwt.TokenExpiredError) throw new Error('ACCESS_TOKEN_EXPIRED');
     throw new Error('INVALID_ACCESS_TOKEN');
   }
 }
 
-export function verifyRefreshToken(token: string): JWTPayload {
+/**
+ * Verify a refresh token and return its claims INCLUDING the `jti`. The jti is
+ * required (every issued refresh token carries one); its absence is rejected.
+ */
+export function verifyRefreshToken(token: string): JWTPayload & { jti: string } {
   try {
-    return verifyWith(token, env.JWT_REFRESH_SECRET, 'refresh');
+    const claims = verifyWith(token, env.JWT_REFRESH_SECRET, 'refresh');
+    if (!claims.jti) throw new Error('JWT_CLAIMS_REJECTED');
+    return claims as JWTPayload & { jti: string };
   } catch (error) {
     if (error instanceof jwt.TokenExpiredError) throw new Error('REFRESH_TOKEN_EXPIRED');
     throw new Error('INVALID_REFRESH_TOKEN');
