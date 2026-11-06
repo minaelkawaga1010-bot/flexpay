@@ -1,4 +1,5 @@
 import apiClient from './client';
+import { tokenManager } from '@services/auth/tokenManager';
 import { AuthUser } from '@/types/user';
 
 export interface VerifyOtpResponse {
@@ -44,8 +45,17 @@ export const authService = {
     return data;
   },
 
-  async logout(): Promise<void> {
-    await apiClient.post('/auth/logout', {});
+  /**
+   * Server-side logout. Delegates to tokenManager so the request carries the
+   * CURRENT refresh token from secure storage via the interceptor-free client
+   * (see tokenManager.revokeServerSession), revoking THIS device's session
+   * family on the backend. Resolves to true only when the server confirmed the
+   * revocation (HTTP 2xx); never throws — logout must not be blocked by the
+   * network. Deliberately NOT sent through `apiClient`: that path would attach
+   * the access token and, on a 401, rotate the refresh token mid-logout.
+   */
+  async logout(): Promise<boolean> {
+    return tokenManager.revokeServerSession();
   },
 
   async loginCompany(email: string, password: string): Promise<CompanyAuthResponse> {

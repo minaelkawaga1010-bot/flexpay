@@ -57,6 +57,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   const logout = useCallback(async () => {
+    // Revoke THIS device's session on the server FIRST: authService.logout()
+    // reads the current refresh token from secure storage and submits it via
+    // an interceptor-free request, so it MUST run before clearTokens() (which
+    // erases that token). It is best-effort and never throws, but guard anyway
+    // so local credentials are always cleared and the device is logged out
+    // locally even if server revocation could not be confirmed (e.g. offline).
     try {
       await authService.logout();
     } catch {

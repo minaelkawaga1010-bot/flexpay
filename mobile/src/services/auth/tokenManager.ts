@@ -19,11 +19,16 @@ const writeOptions: Keychain.Options = {
 };
 
 /**
- * Bare axios instance for the refresh call. We intentionally avoid
- * `apiClient` to break a refresh-on-refresh loop: the response interceptor
- * itself triggers refresh on 401, and using apiClient here would re-enter.
+ * Bare axios instance for the interceptor-free auth calls — token refresh and
+ * server-side logout. We intentionally avoid `apiClient` to stay out of its
+ * response interceptor, which on a 401 triggers a token refresh (hence a
+ * refresh-token ROTATION) and retries the request. Re-entering that loop from
+ * here would either refresh-on-refresh or, during logout, rotate the very
+ * token we are trying to revoke and mint a fresh active session — defeating
+ * logout. This client carries no Authorization header and no Idempotency-Key;
+ * neither call needs them.
  */
-const refreshClient = axios.create({
+const bareAuthClient = axios.create({
   baseURL: apiConfig.baseURL,
   timeout: apiConfig.timeout,
   headers: { 'Content-Type': 'application/json' },
@@ -85,7 +90,7 @@ class TokenManager {
     if (!refreshToken) return null;
 
     try {
-      const { data } = await refreshClient.post<{
+      const { data } = await bareAuthClient.post<{
         accessToken: string;
         refreshToken: string;
       }>('/auth/refresh', { refreshToken });
@@ -105,6 +110,42 @@ class TokenManager {
     } catch (err) {
       logger.error('Token refresh failed', { error: (err as Error).message });
       return null;
+    }
+  }
+
+  /**
+   * Server-side logout for THIS device: submit the CURRENT refresh token to
+   * POST /auth/logout so the backend revokes this device's session family
+   * (TASK-AUTH-R2/R5). MUST be called BEFORE clearTokens(), while the token is
+   * still in secure storage.
+   *
+   * Uses the interceptor-free `bareAuthClient`, so the request can never
+   * re-enter apiClient's 401 -> refresh -> retry loop (which would rotate the
+   * refresh token and create a NEW active session, defeating logout). The
+   * token is read from the Keychain and sent ONLY in the request body — never
+   * in a URL, query string, header, or log line.
+   *
+   * Returns true ONLY when the server confirmed the logout (HTTP 2xx). A
+   * missing token, offline/timeout, or a server error all return false: the
+   * caller must still clear local credentials, but server-side revocation is
+   * NOT reported as confirmed.
+   */
+  async revokeServerSession(): Promise<boolean> {
+    const refreshToken = await this.getRefreshToken();
+    if (!refreshToken) {
+      // No stored token -> nothing to revoke server-side (benign, e.g. the
+      // session was already cleared). Not a confirmed server revocation.
+      return false;
+    }
+    try {
+      await bareAuthClient.post('/auth/logout', { refreshToken });
+      return true;
+    } catch (err) {
+      // Offline / timeout / server error. Never surface the token value.
+      logger.warn('Server-side logout not confirmed', {
+        error: (err as Error).message,
+      });
+      return false;
     }
   }
 
