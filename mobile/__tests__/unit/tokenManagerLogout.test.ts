@@ -127,6 +127,29 @@ describe('TASK-AUTH-R7A — tokenManager.requestServerLogout (F-B ack contract)'
     warnSpy.mockRestore();
   });
 
+  it('never logs a poisoned err.code or err.message — a token in BOTH collapses to a safe label (R7B)', async () => {
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    // Adversarial: the synthetic token is embedded in BOTH the error message
+    // AND a non-whitelisted error code. Neither may ever reach the logs.
+    const poisoned = Object.assign(new Error(`network fault ${STORED_TOKEN}`), {
+      isAxiosError: true,
+      code: `EVIL_${STORED_TOKEN}`,
+    });
+    mockPost.mockRejectedValueOnce(poisoned);
+
+    const result = await tokenManager.requestServerLogout();
+
+    expect(result).toBe(false);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    // Non-whitelisted code -> fixed safe fallback 'unknown'; message never logged.
+    expect(warnSpy).toHaveBeenCalledWith(expect.any(String), { status: 'unknown' });
+    const logged = JSON.stringify(warnSpy.mock.calls);
+    expect(logged).not.toContain(STORED_TOKEN);
+    expect(logged).not.toContain('EVIL_');
+
+    warnSpy.mockRestore();
+  });
+
   it('returns false on a server error (non-2xx rejects), logging only the numeric status', async () => {
     const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
     const serverErr = Object.assign(new Error('Request failed with status code 500'), {

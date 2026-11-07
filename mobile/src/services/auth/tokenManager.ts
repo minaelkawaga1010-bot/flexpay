@@ -35,17 +35,47 @@ const bareAuthClient = axios.create({
 });
 
 /**
- * Extract ONLY a coarse, non-sensitive label from an HTTP error for logging.
- * Returns the numeric HTTP status when present, else an axios error code
- * (e.g. 'ECONNABORTED', 'ERR_NETWORK' — fixed enums), else 'no-response'.
- * It NEVER returns the refresh token, request body, URL, headers, or any
- * credential, so it is always safe to log.
+ * Axios / Node network error codes that are FIXED enums and therefore safe to
+ * log verbatim. Anything outside this allow-list collapses to 'unknown', so an
+ * arbitrary or attacker-influenced `err.code` string can never reach the logs
+ * (TASK-AUTH-R7B).
+ */
+const SAFE_ERROR_CODES: ReadonlySet<string> = new Set([
+  'ECONNABORTED', // axios client-side timeout
+  'ETIMEDOUT',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EPIPE',
+  'ERR_NETWORK',
+  'ERR_CANCELED',
+  'ERR_BAD_RESPONSE',
+  'ERR_BAD_REQUEST',
+  'ERR_FR_TOO_MANY_REDIRECTS',
+]);
+
+/**
+ * Reduce an HTTP error to a STRICTLY BOUNDED, non-sensitive label for logging:
+ *   • a numeric HTTP status when present and within the valid 100–599 range, else
+ *   • a whitelisted axios/Node error code (fixed enums), else
+ *   • the fixed fallback 'unknown'.
+ *
+ * It NEVER returns err.message, a non-whitelisted err.code, the request body,
+ * URL, headers, the refresh token, or any credential — so no arbitrary or
+ * attacker-influenced error field can flow into the logs. The return type is a
+ * closed set: a bounded integer, a member of SAFE_ERROR_CODES, or 'unknown'.
  */
 function httpStatusOf(err: unknown): number | string {
-  const status = (err as { response?: { status?: number } } | null)?.response?.status;
-  if (typeof status === 'number') return status;
-  const code = (err as { code?: string } | null)?.code;
-  return typeof code === 'string' ? code : 'no-response';
+  const status = (err as { response?: { status?: unknown } } | null)?.response?.status;
+  if (typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599) {
+    return status;
+  }
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && SAFE_ERROR_CODES.has(code)) return code;
+  return 'unknown';
 }
 
 class TokenManager {
