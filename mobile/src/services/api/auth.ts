@@ -48,14 +48,16 @@ export const authService = {
   /**
    * Server-side logout. Delegates to tokenManager so the request carries the
    * CURRENT refresh token from secure storage via the interceptor-free client
-   * (see tokenManager.revokeServerSession), revoking THIS device's session
-   * family on the backend. Resolves to true only when the server confirmed the
-   * revocation (HTTP 2xx); never throws — logout must not be blocked by the
-   * network. Deliberately NOT sent through `apiClient`: that path would attach
-   * the access token and, on a 401, rotate the refresh token mid-logout.
+   * (see tokenManager.requestServerLogout), which lets the backend revoke THIS
+   * device's session family. Resolves to true when the server ACKNOWLEDGED the
+   * request (HTTP 2xx) — NOT an independent proof of revocation, since the
+   * backend returns 200 even for an unknown/invalid token. Never throws —
+   * logout must not be blocked by the network. Deliberately NOT sent through
+   * `apiClient`: that path would attach the access token and, on a 401, rotate
+   * the refresh token mid-logout.
    */
   async logout(): Promise<boolean> {
-    return tokenManager.revokeServerSession();
+    return tokenManager.requestServerLogout();
   },
 
   async loginCompany(email: string, password: string): Promise<CompanyAuthResponse> {

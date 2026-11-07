@@ -1,15 +1,19 @@
 /**
- * TASK-AUTH-R7 — mobile server-side logout revocation (finding F-B).
+ * TASK-AUTH-R7 / R7A — mobile server-side logout request (finding F-B) and its
+ * ACKNOWLEDGEMENT contract.
  *
- * Proves tokenManager.revokeServerSession():
+ * Proves tokenManager.requestServerLogout():
  *   • submits the CURRENT refresh token (read from secure storage) to
  *     POST /auth/logout, with the token ONLY in the request body,
  *   • uses the interceptor-free bare client (no Authorization header, no
  *     per-request config) so the request can never re-enter apiClient's
  *     401 → refresh → rotate loop,
- *   • returns true ONLY on a confirmed 2xx,
+ *   • returns true on a 2xx meaning REQUEST ACKNOWLEDGED (NOT independently
+ *     verified revocation — the backend returns 200 even for unknown/invalid
+ *     tokens; that end-to-end property is proven by the backend E2E suite),
  *   • FAILS SAFE on missing token / offline / server error / storage error:
- *     returns false, never throws, and never leaks the token to logs.
+ *     returns false, never throws, and never leaks the token (even one embedded
+ *     in the error message) or any request detail to logs.
  *
  * Synthetic tokens only. The bare client's transport is mocked so no real
  * network call is attempted.
@@ -61,12 +65,14 @@ beforeEach(() => {
   });
 });
 
-describe('TASK-AUTH-R7 — tokenManager.revokeServerSession (F-B)', () => {
-  it('submits the current refresh token to /auth/logout and returns true on 2xx', async () => {
+describe('TASK-AUTH-R7A — tokenManager.requestServerLogout (F-B ack contract)', () => {
+  it('submits the current refresh token to /auth/logout and returns true (ACKNOWLEDGED) on 2xx', async () => {
     mockPost.mockResolvedValueOnce({ status: 200, data: { message: 'Logged out successfully' } });
 
-    const result = await tokenManager.revokeServerSession();
+    const result = await tokenManager.requestServerLogout();
 
+    // true == the server acknowledged the request (HTTP 2xx); NOT a proof of
+    // revocation (see the backend E2E suite for the end-to-end revocation).
     expect(result).toBe(true);
     expect(mockPost).toHaveBeenCalledTimes(1);
     expect(mockPost).toHaveBeenCalledWith('/auth/logout', { refreshToken: STORED_TOKEN });
@@ -77,7 +83,7 @@ describe('TASK-AUTH-R7 — tokenManager.revokeServerSession (F-B)', () => {
   it('sends the token ONLY in the body — no Authorization header, no extra request config', async () => {
     mockPost.mockResolvedValueOnce({ status: 200, data: {} });
 
-    await tokenManager.revokeServerSession();
+    await tokenManager.requestServerLogout();
 
     const callArgs = mockPost.mock.calls[0];
     // (url, body) exactly — a third per-request config arg (where an auth
@@ -91,41 +97,54 @@ describe('TASK-AUTH-R7 — tokenManager.revokeServerSession (F-B)', () => {
   it('returns false and makes NO network call when no refresh token is stored', async () => {
     getPwd.mockResolvedValue(false); // nothing in secure storage
 
-    const result = await tokenManager.revokeServerSession();
+    const result = await tokenManager.requestServerLogout();
 
     expect(result).toBe(false);
     expect(mockPost).not.toHaveBeenCalled();
   });
 
-  it('fails SAFE (false, no throw) when offline, and never logs the token', async () => {
+  it('fails SAFE (false) when offline, logging ONLY a coarse status — never the token, even if embedded in the error message', async () => {
     const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
-    const netErr = Object.assign(new Error('Network Error'), { isAxiosError: true });
+    // Adversarial: embed the token in the error message. The sanitized logger
+    // must still never write it, because it logs only a coarse status label.
+    const netErr = Object.assign(new Error(`network boom ${STORED_TOKEN}`), {
+      isAxiosError: true,
+      code: 'ERR_NETWORK',
+    });
     mockPost.mockRejectedValueOnce(netErr);
 
-    const result = await tokenManager.revokeServerSession();
+    const result = await tokenManager.requestServerLogout();
 
     expect(result).toBe(false);
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    // The token value must never appear in any log argument.
-    expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(STORED_TOKEN);
+    // Only a coarse status label is logged — no message, body, URL, or headers.
+    expect(warnSpy).toHaveBeenCalledWith(expect.any(String), { status: 'ERR_NETWORK' });
+    const logged = JSON.stringify(warnSpy.mock.calls);
+    expect(logged).not.toContain(STORED_TOKEN);
+    expect(logged).not.toContain('Authorization');
+    expect(logged).not.toContain('refreshToken');
 
     warnSpy.mockRestore();
   });
 
-  it('returns false on a server error (non-2xx rejects) without throwing', async () => {
+  it('returns false on a server error (non-2xx rejects), logging only the numeric status', async () => {
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
     const serverErr = Object.assign(new Error('Request failed with status code 500'), {
       isAxiosError: true,
       response: { status: 500, data: { error: 'INTERNAL' } },
     });
     mockPost.mockRejectedValueOnce(serverErr);
 
-    await expect(tokenManager.revokeServerSession()).resolves.toBe(false);
+    await expect(tokenManager.requestServerLogout()).resolves.toBe(false);
+    expect(warnSpy).toHaveBeenCalledWith(expect.any(String), { status: 500 });
+
+    warnSpy.mockRestore();
   });
 
   it('fails SAFE (false, no network call) when secure storage itself throws', async () => {
     getPwd.mockRejectedValueOnce(new Error('keychain locked'));
 
-    await expect(tokenManager.revokeServerSession()).resolves.toBe(false);
+    await expect(tokenManager.requestServerLogout()).resolves.toBe(false);
     expect(mockPost).not.toHaveBeenCalled();
   });
 });

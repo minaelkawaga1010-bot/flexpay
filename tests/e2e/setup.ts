@@ -25,3 +25,14 @@ process.env.PII_BLIND_INDEX_KEY = Buffer.alloc(32, 19).toString('base64');
 // Defaults that match docker-compose. Override via your shell when needed.
 process.env.DATABASE_URL ??= 'postgresql://flexpay:securepass@localhost:5432/flexpay?schema=public';
 process.env.REDIS_URL ??= 'redis://localhost:6379';
+
+// TASK-AUTH-R7A: the whole E2E suite runs SERIALLY from a single loopback IP,
+// so every request shares the global per-IP throughput limiter
+// (`apiRateLimiter`, app.ts) whose default cap is 100 / REDIS_RATE_LIMIT_TTL.
+// Across one run the suite legitimately makes many more than 100 requests, so
+// lift the cap here to keep that throughput protection from throttling later
+// suites (which would surface as spurious 429s). This is a test-harness knob
+// only: it does NOT touch production code, and the per-phone/OTP auth limiters
+// (authRateLimiter max:5, otpRateLimiter max:3 — both separate, in-memory) are
+// unchanged, so auth/replay/lockout assertions keep their real limits.
+process.env.RATE_LIMIT_MAX_REQUESTS ??= '1000000';
