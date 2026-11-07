@@ -19,15 +19,64 @@ const writeOptions: Keychain.Options = {
 };
 
 /**
- * Bare axios instance for the refresh call. We intentionally avoid
- * `apiClient` to break a refresh-on-refresh loop: the response interceptor
- * itself triggers refresh on 401, and using apiClient here would re-enter.
+ * Bare axios instance for the interceptor-free auth calls — token refresh and
+ * server-side logout. We intentionally avoid `apiClient` to stay out of its
+ * response interceptor, which on a 401 triggers a token refresh (hence a
+ * refresh-token ROTATION) and retries the request. Re-entering that loop from
+ * here would either refresh-on-refresh or, during logout, rotate the very
+ * token we are trying to revoke and mint a fresh active session — defeating
+ * logout. This client carries no Authorization header and no Idempotency-Key;
+ * neither call needs them.
  */
-const refreshClient = axios.create({
+const bareAuthClient = axios.create({
   baseURL: apiConfig.baseURL,
   timeout: apiConfig.timeout,
   headers: { 'Content-Type': 'application/json' },
 });
+
+/**
+ * Axios / Node network error codes that are FIXED enums and therefore safe to
+ * log verbatim. Anything outside this allow-list collapses to 'unknown', so an
+ * arbitrary or attacker-influenced `err.code` string can never reach the logs
+ * (TASK-AUTH-R7B).
+ */
+const SAFE_ERROR_CODES: ReadonlySet<string> = new Set([
+  'ECONNABORTED', // axios client-side timeout
+  'ETIMEDOUT',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EPIPE',
+  'ERR_NETWORK',
+  'ERR_CANCELED',
+  'ERR_BAD_RESPONSE',
+  'ERR_BAD_REQUEST',
+  'ERR_FR_TOO_MANY_REDIRECTS',
+]);
+
+/**
+ * Reduce an HTTP error to a STRICTLY BOUNDED, non-sensitive label for logging:
+ *   • a numeric HTTP status when present and within the valid 100–599 range, else
+ *   • a whitelisted axios/Node error code (fixed enums), else
+ *   • the fixed fallback 'unknown'.
+ *
+ * It NEVER returns err.message, a non-whitelisted err.code, the request body,
+ * URL, headers, the refresh token, or any credential — so no arbitrary or
+ * attacker-influenced error field can flow into the logs. The return type is a
+ * closed set: a bounded integer, a member of SAFE_ERROR_CODES, or 'unknown'.
+ */
+function httpStatusOf(err: unknown): number | string {
+  const status = (err as { response?: { status?: unknown } } | null)?.response?.status;
+  if (typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599) {
+    return status;
+  }
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && SAFE_ERROR_CODES.has(code)) return code;
+  return 'unknown';
+}
 
 class TokenManager {
   async storeTokens(accessToken: string, refreshToken: string, user: AuthUser): Promise<void> {
@@ -85,7 +134,7 @@ class TokenManager {
     if (!refreshToken) return null;
 
     try {
-      const { data } = await refreshClient.post<{
+      const { data } = await bareAuthClient.post<{
         accessToken: string;
         refreshToken: string;
       }>('/auth/refresh', { refreshToken });
@@ -105,6 +154,49 @@ class TokenManager {
     } catch (err) {
       logger.error('Token refresh failed', { error: (err as Error).message });
       return null;
+    }
+  }
+
+  /**
+   * Request server-side logout for THIS device: submit the CURRENT refresh
+   * token to POST /auth/logout so the backend can revoke this device's session
+   * family (TASK-AUTH-R2/R5). MUST be called BEFORE clearTokens(), while the
+   * token is still in secure storage.
+   *
+   * Uses the interceptor-free `bareAuthClient`, so the request can never
+   * re-enter apiClient's 401 -> refresh -> retry loop (which would rotate the
+   * refresh token and create a NEW active session, defeating logout). The
+   * token is read from the Keychain and sent ONLY in the request body — never
+   * in a URL, query string, header, or log line.
+   *
+   * CONTRACT (TASK-AUTH-R7A): a `true` result means the server ACKNOWLEDGED the
+   * logout request (HTTP 2xx) — it is NOT independent proof that the session
+   * was revoked. The backend logout endpoint is idempotent and returns HTTP 200
+   * even for an unknown, already-revoked, or malformed token, so the client
+   * must never treat 2xx as verification of revocation. (For this device's
+   * genuine current token a 2xx does cause family revocation server-side —
+   * proven by the backend E2E suite — but that guarantee is a backend property,
+   * not something the status code alone proves to the client.) A missing token,
+   * offline/timeout, or a non-2xx response return `false`; the caller MUST still
+   * clear local credentials regardless of the result.
+   */
+  async requestServerLogout(): Promise<boolean> {
+    const refreshToken = await this.getRefreshToken();
+    if (!refreshToken) {
+      // No stored token -> nothing to send (benign, e.g. already cleared).
+      // Not an acknowledged logout request.
+      return false;
+    }
+    try {
+      await bareAuthClient.post('/auth/logout', { refreshToken });
+      return true; // HTTP 2xx: request ACKNOWLEDGED (not verified revocation).
+    } catch (err) {
+      // Offline / timeout / server error. Log ONLY a coarse status — never the
+      // token, request body, URL, headers, or any credential.
+      logger.warn('Server-side logout request not acknowledged', {
+        status: httpStatusOf(err),
+      });
+      return false;
     }
   }
 
